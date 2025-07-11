@@ -4,7 +4,7 @@ from telebot import types
 import flask
 import openai
 
-# محیط
+# متغیرهای محیطی
 TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
@@ -16,25 +16,26 @@ app = flask.Flask(__name__)
 openai.api_key = OPENAI_API_KEY
 
 player_data = {}  # user_id -> country
+default_assets = {}
 pending_statements = {}
 pending_assets = {}
 player_assets = {}
 allowed_chat_id = None
 bot_enabled = True
 
-# ابزار
+# -- ابزار --
 def is_owner(message):
     return message.from_user.id == OWNER_ID
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("🌍 رول و خرابکاری", callback_data="sabotage"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 \u0627\u0631\u0633\u0627\u0644 \u0628\u06cc\u0627\u0646\u06cc\u0647", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udcbc \u062f\u0627\u0631\u0627\u06cc\u06cc", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udd25 \u062d\u0645\u0644\u0647", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("\ud83c\udf1d \u0631\u0648\u0644 \u0648 \u062e\u0631\u0627\u0628\u06a9\u0627\u0631\u06cc", callback_data="sabotage"))
     return markup
 
-# دستورات مدیریتی
+# -- دستورات --
 @bot.message_handler(commands=['setcountry'])
 def set_country(message):
     if not is_owner(message): return
@@ -58,8 +59,8 @@ def set_assets(message):
         text = message.text.split(None, 2)[2]
         pending_assets[user_id] = text
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{user_id}"))
-        markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("\u2705 \u062a\u0627\u06cc\u06cc\u062f", callback_data=f"confirm_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("\u274c \u0644\u063a\u0648", callback_data=f"cancel_assets:{user_id}"))
         bot.send_message(message.chat.id, f"متن دارایی:\n{text}\n\nمورد تایید هست؟", reply_markup=markup)
     except:
         bot.reply_to(message, "فرمت: /setassets [user_id] [text]")
@@ -86,7 +87,7 @@ def send_menu(message):
     if message.from_user.id in player_data and message.chat.id == allowed_chat_id:
         bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
 
-# بیانیه
+# -- منو --
 @bot.callback_query_handler(func=lambda call: call.data == "statement")
 def handle_statement(call):
     msg = bot.send_message(call.message.chat.id, "متن بیانیه خود را ارسال کنید:")
@@ -110,7 +111,6 @@ def confirm_statement_handler(call):
         bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu())
     pending_statements.pop(user_id, None)
 
-# دارایی
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_assets") or c.data.startswith("cancel_assets"))
 def confirm_assets_handler(call):
     parts = call.data.split(":")
@@ -128,7 +128,6 @@ def handle_assets(call):
     text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
     bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
-# حمله
 @bot.callback_query_handler(func=lambda call: call.data == "attack")
 def handle_attack(call):
     msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور مورد حمله\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
@@ -143,29 +142,28 @@ def process_attack(message):
     except:
         bot.send_message(message.chat.id, "❌ فرمت اشتباه است")
 
-# خرابکاری + هوش مصنوعی
 @bot.callback_query_handler(func=lambda call: call.data == "sabotage")
 def handle_sabotage(call):
     msg = bot.send_message(call.message.chat.id, "رول خود را وارد کنید تا تحلیل شود:")
     bot.register_next_step_handler(msg, analyze_sabotage)
 
 def analyze_sabotage(message):
-    prompt = f"این یک رول خرابکاری در یک بازی جنگی است:\n\"{message.text}\"\nلطفاً نتیجه این رول را بر اساس مفاهیم خرابکاری و نفوذ تحلیل کن."
+    prompt = f"رول نظامی:
+{message.text}
+
+تحلیل نظامی این رول رو فقط در یک جمله خلاصه و دقیق بنویس."
     try:
-        completion = openai.ChatCompletion.create(
+        response = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "تو یک تحلیلگر نظامی هستی"},
                 {"role": "user", "content": prompt}
-            ],
-            max_tokens=300
+            ]
         )
-        reply = completion['choices'][0]['message']['content']
-        bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{reply}", reply_markup=main_menu())
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
+        result = response.choices[0].message.content.strip()
+    except:
+        result = "⛔ تحلیل هوش مصنوعی انجام نشد"
+    bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{result}", reply_markup=main_menu())
 
-# Webhook route
 @app.route('/', methods=['POST'])
 def webhook():
     if flask.request.headers.get('content-type') == 'application/json':
@@ -176,12 +174,7 @@ def webhook():
     else:
         flask.abort(403)
 
-# تنظیم webhook
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 
 print("ربات با webhook راه‌اندازی شد...")
-
-# این خط ربات رو زنده نگه‌میداره روی Render
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
