@@ -2,36 +2,42 @@ import os
 import telebot
 from telebot import types
 import flask
-import re
 
+# متغیرهای محیطی
 TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_IDS = [int(x) for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip().isdigit()]
+OWNER_IDS = [
+    int(os.environ.get("OWNER_ID")),
+    int(os.environ.get("OWNER_ID2", 0))
+]
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
 bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
 
-player_data = {}
-default_assets = {}
-pending_statements = {}
+player_data = {}  # user_id -> country
+player_assets = {}  # user_id -> assets
 pending_assets = {}
-player_assets = {}
+pending_statements = {}
+
 allowed_chat_id = None
 bot_enabled = True
 
-# -- ابزار --
+# ابزار
+
 def is_owner(message):
     return message.from_user.id in OWNER_IDS
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 \u0627\u0631\u0633\u0627\u0644 \u0628\u06cc\u0627\u0646\u06cc\u0647", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udcbc \u062f\u0627\u0631\u0627\u06cc\u06cc", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udd25 \u062d\u0645\u0644\u0647", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("\ud83c\udf1d \u0631\u0648\u0644 \u0648 \u062e\u0631\u0627\u0628\u06a9\u0627\u0631\u06cc", callback_data="sabotage"))
+    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("🌝 رول و خرابکاری", callback_data="sabotage"))
+    markup.add(types.InlineKeyboardButton("🔄 ارتقاء بازدهی", callback_data="upgrade"))
     return markup
 
+# دستورات
 @bot.message_handler(commands=['setcountry'])
 def set_country(message):
     if not is_owner(message): return
@@ -55,8 +61,8 @@ def set_assets(message):
         text = message.text.split(None, 2)[2]
         pending_assets[user_id] = text
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("\u2705 \u062a\u0627\u06cc\u06cc\u062f", callback_data=f"confirm_assets:{user_id}"))
-        markup.add(types.InlineKeyboardButton("\u274c \u0644\u063a\u0648", callback_data=f"cancel_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{user_id}"))
         bot.send_message(message.chat.id, f"متن دارایی:\n{text}\n\nمورد تایید هست؟", reply_markup=markup)
     except:
         bot.reply_to(message, "فرمت: /setassets [user_id] [text]")
@@ -81,25 +87,9 @@ def send_menu(message):
         bot.reply_to(message, "⛔ ربات خاموش است")
         return
     if message.from_user.id in player_data and message.chat.id == allowed_chat_id:
-        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "به پنل خوش آمدید", reply_markup=main_menu())
 
-@bot.message_handler(commands=['up'])
-def handle_up(message):
-    if not bot_enabled or message.from_user.id not in player_assets:
-        return
-    assets = player_assets[message.from_user.id]
-    updated = []
-    for line in assets.splitlines():
-        match = re.search(r'(.+?)\[(\d+)\]\s*:\s*(\d+)', line)
-        if match:
-            name, boost, value = match.groups()
-            new_value = int(value) + int(boost)
-            updated.append(f"{name}[{boost}]: {new_value}")
-        else:
-            updated.append(line)
-    player_assets[message.from_user.id] = '\n'.join(updated)
-    bot.reply_to(message, "✅ بازدهی اعمال شد")
-
+# منو
 @bot.callback_query_handler(func=lambda call: call.data == "statement")
 def handle_statement(call):
     msg = bot.send_message(call.message.chat.id, "متن بیانیه خود را ارسال کنید:")
@@ -140,34 +130,47 @@ def handle_assets(call):
     text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
     bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
+@bot.callback_query_handler(func=lambda call: call.data == "upgrade")
+def handle_upgrade(call):
+    user_id = call.from_user.id
+    text = player_assets.get(user_id, None)
+    if not text:
+        bot.send_message(call.message.chat.id, "⛔ دارایی ثبت نشده")
+        return
+
+    def apply_upgrade(line):
+        import re
+        pattern = r"(\[)(\d+)(\])\s*:\s*(\d+)"
+        match = re.search(pattern, line)
+        if match:
+            boost = int(match.group(2))
+            value = int(match.group(4))
+            new_value = value + boost
+            return re.sub(r":\s*\d+", f": {new_value}", line)
+        return line
+
+    upgraded_lines = [apply_upgrade(l) for l in text.splitlines()]
+    new_text = "\n".join(upgraded_lines)
+    player_assets[user_id] = new_text
+    bot.send_message(call.message.chat.id, f"✅ دارایی شما با بازدهی جدید:\n{new_text}", reply_markup=main_menu())
+
 @bot.callback_query_handler(func=lambda call: call.data == "attack")
 def handle_attack(call):
-    msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور مورد حمله\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
+    msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور هدف\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
     bot.register_next_step_handler(msg, process_attack)
 
 def process_attack(message):
     try:
         lines = message.text.split('\n')
         text = f"🚀 کشور {lines[0]} به {lines[1]} حمله کرد\nشهر: {lines[2]}\nمختصات: {lines[3]}\nتعداد موشک‌ها: {lines[4]}\nنوع موشک‌ها: {lines[5]}"
-        bot.send_message(f"{CHANNEL_USERNAME}", text)
+        bot.send_message(CHANNEL_USERNAME, text)
         bot.send_message(message.chat.id, "✅ حمله ثبت شد", reply_markup=main_menu())
     except:
         bot.send_message(message.chat.id, "❌ فرمت اشتباه است")
 
 @bot.callback_query_handler(func=lambda call: call.data == "sabotage")
 def handle_sabotage(call):
-    msg = bot.send_message(call.message.chat.id, "رول خود را وارد کنید تا تحلیل شود:")
-    bot.register_next_step_handler(msg, analyze_sabotage)
-
-def analyze_sabotage(message):
-    text = message.text
-    if "نفوذ" in text or "خرابکاری" in text:
-        response = "✅ عملیات خرابکاری محتمل و موفقیت‌آمیز تحلیل شد"
-    elif "شکست" in text or "لو رفت" in text:
-        response = "❌ احتمال شکست بالا طبق تحلیل"
-    else:
-        response = "ℹ️ تحلیل خاصی شناسایی نشد. لطفاً با جزئیات بیشتری بنویسید"
-    bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{response}", reply_markup=main_menu())
+    bot.send_message(call.message.chat.id, "💡 تحلیل رول غیرفعال شده است. برای فعال‌سازی هوش مصنوعی باید API داشته باشید.", reply_markup=main_menu())
 
 @app.route('/', methods=['POST'])
 def webhook():
