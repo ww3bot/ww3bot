@@ -3,6 +3,7 @@ import telebot
 from telebot import types
 import flask
 import openai
+import re
 
 # متغیرهای محیطی
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -29,10 +30,11 @@ def is_owner(message):
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 \u0627\u0631\u0633\u0627\u0644 \u0628\u06cc\u0627\u0646\u06cc\u0647", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udcbc \u062f\u0627\u0631\u0627\u06cc\u06cc", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udd25 \u062d\u0645\u0644\u0647", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("\ud83c\udf1d \u0631\u0648\u0644 \u0648 \u062e\u0631\u0627\u0628\u06a9\u0627\u0631\u06cc", callback_data="sabotage"))
+    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("🌝 رول و خرابکاری", callback_data="sabotage"))
+    markup.add(types.InlineKeyboardButton("📈 افزایش بازدهی", callback_data="upgrade"))
     return markup
 
 # -- دستورات --
@@ -59,8 +61,8 @@ def set_assets(message):
         text = message.text.split(None, 2)[2]
         pending_assets[user_id] = text
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("\u2705 \u062a\u0627\u06cc\u06cc\u062f", callback_data=f"confirm_assets:{user_id}"))
-        markup.add(types.InlineKeyboardButton("\u274c \u0644\u063a\u0648", callback_data=f"cancel_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{user_id}"))
+        markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{user_id}"))
         bot.send_message(message.chat.id, f"متن دارایی:\n{text}\n\nمورد تایید هست؟", reply_markup=markup)
     except:
         bot.reply_to(message, "فرمت: /setassets [user_id] [text]")
@@ -148,21 +150,43 @@ def handle_sabotage(call):
     bot.register_next_step_handler(msg, analyze_sabotage)
 
 def analyze_sabotage(message):
-    prompt = f"رول نظامی:
-{message.text}
-
-تحلیل نظامی این رول رو فقط در یک جمله خلاصه و دقیق بنویس."
+    user_id = message.from_user.id
+    text = message.text
     try:
+        prompt = f"""رول نظامی:
+{text}
+لطفاً این رول را از نظر احتمال موفقیت یا شکست، اهداف، نوع خرابکاری و شانس لو رفتن تحلیل کن و خلاصه واضح بده:"""
         response = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "تو یک تحلیلگر نظامی فارسی‌زبان هستی"},
+                {"role": "user", "content": prompt},
             ]
         )
-        result = response.choices[0].message.content.strip()
-    except:
-        result = "⛔ تحلیل هوش مصنوعی انجام نشد"
-    bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{result}", reply_markup=main_menu())
+        reply = response.choices[0].message.content
+        bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{reply}", reply_markup=main_menu())
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
+
+@bot.callback_query_handler(func=lambda call: call.data == "upgrade")
+def handle_upgrade(call):
+    user_id = call.from_user.id
+    text = player_assets.get(user_id, None)
+    if not text:
+        bot.send_message(call.message.chat.id, "⛔ دارایی ثبت نشده")
+        return
+    upgraded = []
+    def repl(match):
+        name = match.group(1)
+        efficiency = int(match.group(2))
+        value = int(match.group(3)) + efficiency
+        upgraded.append(f"{name} [{efficiency}]: {value}")
+        return f"{name} [{efficiency}]: {value}"
+
+    pattern = r"(.+?) \[(\d+)\]: (\d+)"
+    updated_text = re.sub(pattern, repl, text)
+    player_assets[user_id] = updated_text
+    bot.send_message(call.message.chat.id, f"✅ بازدهی افزایش یافت:\n{updated_text}", reply_markup=main_menu())
 
 @app.route('/', methods=['POST'])
 def webhook():
