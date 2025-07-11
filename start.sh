@@ -1,3 +1,3 @@
 #!/bin/bash
-pip install -r requirements.txt
+export FLASK_APP=ww3bot.py
 python3 ww3bot.py
