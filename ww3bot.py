@@ -2,42 +2,39 @@ import os
 import telebot
 from telebot import types
 import flask
+import openai
 
-# متغیرهای محیطی
+# محیط
 TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_IDS = [
-    int(os.environ.get("OWNER_ID")),
-    int(os.environ.get("OWNER_ID2", 0))
-]
+OWNER_ID = int(os.environ.get("OWNER_ID"))
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
+openai.api_key = OPENAI_API_KEY
 
 player_data = {}  # user_id -> country
-player_assets = {}  # user_id -> assets
-pending_assets = {}
 pending_statements = {}
-
+pending_assets = {}
+player_assets = {}
 allowed_chat_id = None
 bot_enabled = True
 
 # ابزار
-
 def is_owner(message):
-    return message.from_user.id in OWNER_IDS
+    return message.from_user.id == OWNER_ID
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
     markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
     markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("🌝 رول و خرابکاری", callback_data="sabotage"))
-    markup.add(types.InlineKeyboardButton("🔄 ارتقاء بازدهی", callback_data="upgrade"))
+    markup.add(types.InlineKeyboardButton("🌍 رول و خرابکاری", callback_data="sabotage"))
     return markup
 
-# دستورات
+# دستورات مدیریتی
 @bot.message_handler(commands=['setcountry'])
 def set_country(message):
     if not is_owner(message): return
@@ -87,9 +84,9 @@ def send_menu(message):
         bot.reply_to(message, "⛔ ربات خاموش است")
         return
     if message.from_user.id in player_data and message.chat.id == allowed_chat_id:
-        bot.send_message(message.chat.id, "به پنل خوش آمدید", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
 
-# منو
+# بیانیه
 @bot.callback_query_handler(func=lambda call: call.data == "statement")
 def handle_statement(call):
     msg = bot.send_message(call.message.chat.id, "متن بیانیه خود را ارسال کنید:")
@@ -113,6 +110,7 @@ def confirm_statement_handler(call):
         bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu())
     pending_statements.pop(user_id, None)
 
+# دارایی
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_assets") or c.data.startswith("cancel_assets"))
 def confirm_assets_handler(call):
     parts = call.data.split(":")
@@ -130,48 +128,44 @@ def handle_assets(call):
     text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
     bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
-@bot.callback_query_handler(func=lambda call: call.data == "upgrade")
-def handle_upgrade(call):
-    user_id = call.from_user.id
-    text = player_assets.get(user_id, None)
-    if not text:
-        bot.send_message(call.message.chat.id, "⛔ دارایی ثبت نشده")
-        return
-
-    def apply_upgrade(line):
-        import re
-        pattern = r"(\[)(\d+)(\])\s*:\s*(\d+)"
-        match = re.search(pattern, line)
-        if match:
-            boost = int(match.group(2))
-            value = int(match.group(4))
-            new_value = value + boost
-            return re.sub(r":\s*\d+", f": {new_value}", line)
-        return line
-
-    upgraded_lines = [apply_upgrade(l) for l in text.splitlines()]
-    new_text = "\n".join(upgraded_lines)
-    player_assets[user_id] = new_text
-    bot.send_message(call.message.chat.id, f"✅ دارایی شما با بازدهی جدید:\n{new_text}", reply_markup=main_menu())
-
+# حمله
 @bot.callback_query_handler(func=lambda call: call.data == "attack")
 def handle_attack(call):
-    msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور هدف\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
+    msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور مورد حمله\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
     bot.register_next_step_handler(msg, process_attack)
 
 def process_attack(message):
     try:
         lines = message.text.split('\n')
         text = f"🚀 کشور {lines[0]} به {lines[1]} حمله کرد\nشهر: {lines[2]}\nمختصات: {lines[3]}\nتعداد موشک‌ها: {lines[4]}\nنوع موشک‌ها: {lines[5]}"
-        bot.send_message(CHANNEL_USERNAME, text)
+        bot.send_message(f"{CHANNEL_USERNAME}", text)
         bot.send_message(message.chat.id, "✅ حمله ثبت شد", reply_markup=main_menu())
     except:
         bot.send_message(message.chat.id, "❌ فرمت اشتباه است")
 
+# خرابکاری + هوش مصنوعی
 @bot.callback_query_handler(func=lambda call: call.data == "sabotage")
 def handle_sabotage(call):
-    bot.send_message(call.message.chat.id, "💡 تحلیل رول غیرفعال شده است. برای فعال‌سازی هوش مصنوعی باید API داشته باشید.", reply_markup=main_menu())
+    msg = bot.send_message(call.message.chat.id, "رول خود را وارد کنید تا تحلیل شود:")
+    bot.register_next_step_handler(msg, analyze_sabotage)
 
+def analyze_sabotage(message):
+    prompt = f"این یک رول خرابکاری در یک بازی جنگی است:\n\"{message.text}\"\nلطفاً نتیجه این رول را بر اساس مفاهیم خرابکاری و نفوذ تحلیل کن."
+    try:
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "تو یک تحلیلگر نظامی هستی"},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=300
+        )
+        reply = completion['choices'][0]['message']['content']
+        bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{reply}", reply_markup=main_menu())
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
+
+# Webhook route
 @app.route('/', methods=['POST'])
 def webhook():
     if flask.request.headers.get('content-type') == 'application/json':
@@ -182,7 +176,12 @@ def webhook():
     else:
         flask.abort(403)
 
+# تنظیم webhook
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 
 print("ربات با webhook راه‌اندازی شد...")
+
+# این خط ربات رو زنده نگه‌میداره روی Render
+if __name__ == '__main__':
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
