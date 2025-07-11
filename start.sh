@@ -1,2 +1,3 @@
 #!/bin/bash
-gunicorn --bind 0.0.0.0:$PORT ww3bot:app
+pip install -r requirements.txt
+python3 ww3bot.py
