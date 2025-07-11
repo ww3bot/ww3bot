@@ -1,2 +1,2 @@
 #!/bin/bash
-python3 ww3bot.py
+gunicorn --bind 0.0.0.0:$PORT ww3bot:app
