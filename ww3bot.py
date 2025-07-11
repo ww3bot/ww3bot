@@ -2,19 +2,15 @@ import os
 import telebot
 from telebot import types
 import flask
-import openai
-import re
 
 # متغیرهای محیطی
 TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
-openai.api_key = OPENAI_API_KEY
 
 player_data = {}  # user_id -> country
 default_assets = {}
@@ -34,7 +30,6 @@ def main_menu():
     markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
     markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
     markup.add(types.InlineKeyboardButton("🌝 رول و خرابکاری", callback_data="sabotage"))
-    markup.add(types.InlineKeyboardButton("📈 افزایش بازدهی", callback_data="upgrade"))
     return markup
 
 # -- دستورات --
@@ -150,43 +145,43 @@ def handle_sabotage(call):
     bot.register_next_step_handler(msg, analyze_sabotage)
 
 def analyze_sabotage(message):
-    user_id = message.from_user.id
     text = message.text
-    try:
-        prompt = f"""رول نظامی:
-{text}
-لطفاً این رول را از نظر احتمال موفقیت یا شکست، اهداف، نوع خرابکاری و شانس لو رفتن تحلیل کن و خلاصه واضح بده:"""
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "تو یک تحلیلگر نظامی فارسی‌زبان هستی"},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        reply = response.choices[0].message.content
-        bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{reply}", reply_markup=main_menu())
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
+    if "نفوذ" in text or "خرابکاری" in text:
+        response = "✅ عملیات خرابکاری محتمل و موفقیت‌آمیز تحلیل شد"
+    elif "شکست" in text or "لو رفت" in text:
+        response = "❌ احتمال شکست بالا طبق تحلیل"
+    else:
+        response = "ℹ️ تحلیل خاصی شناسایی نشد. لطفاً با جزئیات بیشتری بنویسید"
+    bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{response}", reply_markup=main_menu())
 
-@bot.callback_query_handler(func=lambda call: call.data == "upgrade")
-def handle_upgrade(call):
-    user_id = call.from_user.id
-    text = player_assets.get(user_id, None)
-    if not text:
-        bot.send_message(call.message.chat.id, "⛔ دارایی ثبت نشده")
+@bot.message_handler(commands=['up'])
+def update_assets(message):
+    user_id = message.from_user.id
+    if user_id not in player_assets:
+        bot.reply_to(message, "⛔ شما هنوز دارایی‌ای ندارید")
         return
-    upgraded = []
-    def repl(match):
-        name = match.group(1)
-        efficiency = int(match.group(2))
-        value = int(match.group(3)) + efficiency
-        upgraded.append(f"{name} [{efficiency}]: {value}")
-        return f"{name} [{efficiency}]: {value}"
 
-    pattern = r"(.+?) \[(\d+)\]: (\d+)"
-    updated_text = re.sub(pattern, repl, text)
-    player_assets[user_id] = updated_text
-    bot.send_message(call.message.chat.id, f"✅ بازدهی افزایش یافت:\n{updated_text}", reply_markup=main_menu())
+    text = player_assets[user_id]
+    new_lines = []
+
+    for line in text.splitlines():
+        if "[" in line and "]" in line and ":" in line:
+            try:
+                name_part, amount_part = line.split(":", 1)
+                name, boost = name_part.rsplit("[", 1)
+                boost = int(boost.strip("] "))
+                amount = int(amount_part.strip())
+
+                new_amount = amount + boost
+                new_line = f"{name.strip()}[{boost}]: {new_amount}"
+                new_lines.append(new_line)
+            except:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    player_assets[user_id] = "\n".join(new_lines)
+    bot.reply_to(message, "✅ بازدهی اعمال شد")
 
 @app.route('/', methods=['POST'])
 def webhook():
