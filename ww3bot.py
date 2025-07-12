@@ -26,14 +26,11 @@ bot_enabled = True
 def is_owner(message):
     return message.from_user.id in [OWNER_ID, OWNER_ID_2]
 
-def is_owner_id(user_id):
-    return user_id in [OWNER_ID, OWNER_ID_2]
-
-def main_menu(user_id):
+def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data=f"statement:{user_id}"))
-    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data=f"assets:{user_id}"))
-    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data=f"attack:{user_id}"))
+    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
     return markup
 
 # ست کشور
@@ -97,36 +94,32 @@ def send_menu(message):
     if not bot_enabled:
         bot.reply_to(message, "⛔ ربات خاموش است")
         return
-    user_id = message.from_user.id
-    if user_id in player_data or is_owner_id(user_id):
-        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu(user_id))
+    uid = message.from_user.id
+    if uid in player_data or is_owner(message):
+        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
 
 # بیانیه
-@bot.callback_query_handler(func=lambda call: call.data.startswith("statement"))
+@bot.callback_query_handler(func=lambda call: call.data == "statement")
 def handle_statement(call):
-    target_id = int(call.data.split(":")[1])
-    if call.from_user.id != target_id and not is_owner_id(call.from_user.id): return
     msg = bot.send_message(call.message.chat.id, "متن بیانیه خود را ارسال کنید:")
-    bot.register_next_step_handler(msg, lambda m: process_statement(m, target_id))
+    bot.register_next_step_handler(msg, process_statement)
 
-def process_statement(message, target_id):
-    pending_statements[target_id] = message.text
+def process_statement(message):
+    pending_statements[message.from_user.id] = message.text
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_statement:{target_id}"))
-    markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_statement:{target_id}"))
-    bot.send_message(message.chat.id, f"{player_data.get(target_id, 'کشور ثبت نشده')}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
+    markup.add(types.InlineKeyboardButton("✅ تایید", callback_data="confirm_statement"))
+    markup.add(types.InlineKeyboardButton("❌ لغو", callback_data="cancel_statement"))
+    bot.send_message(message.chat.id, f"{player_data.get(message.from_user.id, 'کشور ثبت نشده')}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_statement") or c.data.startswith("cancel_statement"))
+@bot.callback_query_handler(func=lambda c: c.data in ["confirm_statement", "cancel_statement"])
 def confirm_statement_handler(call):
-    parts = call.data.split(":")
-    user_id = int(parts[1])
-    if call.from_user.id != user_id and not is_owner_id(call.from_user.id): return
-    if call.data.startswith("confirm_statement"):
-        text = f"📢 بیانیه از کشور {player_data[user_id]}:\n{pending_statements[user_id]}"
+    user_id = call.from_user.id
+    if call.data == "confirm_statement":
+        text = f"📢 بیانیه از کشور {player_data.get(user_id, 'ناشناخته')}:\n{pending_statements[user_id]}"
         bot.send_message(f"{CHANNEL_USERNAME}", text)
-        bot.send_message(call.message.chat.id, "✅ بیانیه ارسال شد", reply_markup=main_menu(user_id))
+        bot.send_message(call.message.chat.id, "✅ بیانیه ارسال شد", reply_markup=main_menu())
     else:
-        bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu(user_id))
+        bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu())
     pending_statements.pop(user_id, None)
 
 # تایید دارایی
@@ -136,26 +129,28 @@ def confirm_assets_handler(call):
     user_id = int(parts[1])
     if call.data.startswith("confirm_assets"):
         player_assets[user_id] = pending_assets.get(user_id, "ثبت نشده")
-        bot.send_message(call.message.chat.id, "✅ دارایی ثبت شد", reply_markup=main_menu(user_id))
+        bot.send_message(call.message.chat.id, "✅ دارایی ثبت شد", reply_markup=main_menu())
     else:
-        bot.send_message(call.message.chat.id, "❌ دارایی لغو شد", reply_markup=main_menu(user_id))
+        bot.send_message(call.message.chat.id, "❌ دارایی لغو شد", reply_markup=main_menu())
     pending_assets.pop(user_id, None)
 
 # نمایش دارایی
-@bot.callback_query_handler(func=lambda c: c.data.startswith("assets"))
+@bot.callback_query_handler(func=lambda c: c.data == "assets")
 def handle_assets(call):
-    target_id = int(call.data.split(":")[1])
-    if call.from_user.id != target_id and not is_owner_id(call.from_user.id): return
+    caller_id = call.from_user.id
+    target_id = caller_id
+    if is_owner(call):  # اگر ادمین هستی و ریپلای روی پلیر زدی
+        if call.message.reply_to_message:
+            target_id = call.message.reply_to_message.from_user.id
     text = player_assets.get(target_id, "⛔ دارایی ثبت نشده")
-    bot.send_message(call.message.chat.id, f"📦 دارایی:
-{text}", reply_markup=main_menu(target_id))
+    country = player_data.get(target_id, "نامشخص")
+    bot.send_message(call.message.chat.id, f"📦 دارایی ({country}):\n{text}", reply_markup=main_menu())
 
 # ارتقاء بازدهی
 @bot.message_handler(commands=['up'])
 def handle_up(message):
+    if not bot_enabled: return
     user_id = message.from_user.id
-    if not is_owner(message) and user_id not in player_data:
-        return
     target_id = user_id
     if is_owner(message) and message.reply_to_message:
         target_id = message.reply_to_message.from_user.id
@@ -180,11 +175,10 @@ def handle_up(message):
             updated_lines.append(line)
     updated_text = '\n'.join(updated_lines)
     player_assets[target_id] = updated_text
-    bot.send_message(message.chat.id, f"📈 دارایی با بازدهی به‌روز شد:\n{updated_text}", reply_markup=main_menu(target_id))
+    bot.send_message(message.chat.id, f"📈 دارایی با بازدهی به‌روز شد:\n{updated_text}", reply_markup=main_menu())
 
 # بکاپ‌گیری
 BACKUP_FILE = "backup.json"
-
 def backup_data():
     while True:
         try:
