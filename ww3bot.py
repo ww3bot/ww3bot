@@ -20,10 +20,6 @@ player_data = {}  # user_id -> country
 pending_statements = {}
 pending_assets = {}
 player_assets = {}
-message_steps = {}  # user_id -> step
-message_targets = {}  # user_id -> target_country
-country_to_group = {}  # country_name -> group_id
-allowed_chat_id = None
 bot_enabled = True
 
 # ابزار
@@ -32,10 +28,9 @@ def is_owner(message):
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 \u0627\u0631\u0633\u0627\u0644 \u0628\u06cc\u0627\u0646\u06cc\u0647", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udcbc \u062f\u0627\u0631\u0627\u06cc\u06cc", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udd25 \u062d\u0645\u0644\u0647", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("\u2709\ufe0f \u0627\0631\0633\0627\0644 \u067e\06cc\0627\0645", callback_data="sendmsg"))
+    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
     return markup
 
 # ست کشور
@@ -113,7 +108,8 @@ def process_statement(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ تایید", callback_data="confirm_statement"))
     markup.add(types.InlineKeyboardButton("❌ لغو", callback_data="cancel_statement"))
-    bot.send_message(message.chat.id, f"{player_data.get(message.from_user.id, 'کشور ثبت نشده')}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
+    country = player_data.get(message.from_user.id, 'کشور ثبت نشده')
+    bot.send_message(message.chat.id, f"{country}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data in ["confirm_statement", "cancel_statement"])
 def confirm_statement_handler(call):
@@ -171,49 +167,6 @@ def handle_up(message):
     updated_text = '\n'.join(updated_lines)
     player_assets[user_id] = updated_text
     bot.send_message(message.chat.id, f"📈 دارایی با بازدهی به‌روز شد:\n{updated_text}", reply_markup=main_menu())
-
-# ارسال پیام بین کشورها
-@bot.callback_query_handler(func=lambda call: call.data == "sendmsg")
-def sendmsg_step1(call):
-    user_id = call.from_user.id
-    message_steps[user_id] = "awaiting_target"
-    msg = bot.send_message(call.message.chat.id, "نام کشور مقصد را بنویسید:")
-    bot.register_next_step_handler(msg, process_msg_target)
-
-def process_msg_target(message):
-    user_id = message.from_user.id
-    target_country = message.text.strip()
-    if target_country not in player_data.values():
-        bot.send_message(message.chat.id, "⛔ کشور یافت نشد")
-        return
-    message_targets[user_id] = target_country
-    message_steps[user_id] = "awaiting_text"
-    msg = bot.send_message(message.chat.id, "✅ حالا متن پیام خود را بنویسید:")
-    bot.register_next_step_handler(msg, process_msg_text)
-
-def process_msg_text(message):
-    user_id = message.from_user.id
-    sender_country = player_data.get(user_id, "نامشخص")
-    target_country = message_targets.get(user_id)
-    if not target_country:
-        bot.send_message(message.chat.id, "⛔ خطا در پردازش مقصد")
-        return
-
-    group_id = None
-    for uid, c in player_data.items():
-        if c == target_country:
-            group_id = uid
-            break
-
-    if group_id:
-        final_msg = f"📨 پیام از طرف کشور {sender_country} به {target_country}:\nمتن پیام: {message.text}"
-        bot.send_message(group_id, final_msg)
-        bot.send_message(message.chat.id, "✅ پیام ارسال شد", reply_markup=main_menu())
-    else:
-        bot.send_message(message.chat.id, "⛔ گروهی برای کشور مقصد یافت نشد")
-
-    message_steps.pop(user_id, None)
-    message_targets.pop(user_id, None)
 
 # بکاپ‌گیری
 BACKUP_FILE = "backup.json"
