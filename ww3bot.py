@@ -17,101 +17,171 @@ bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
 
 player_data = {}  # user_id -> country
-player_assets = {}  # user_id -> asset
 pending_statements = {}
+pending_assets = {}
+player_assets = {}
 allowed_chat_id = None
 bot_enabled = True
 
-# ابزار
+BACKUP_FILE = "backup.json"
 
+# ابزار
 def is_owner(message):
     return message.from_user.id in [OWNER_ID, OWNER_ID_2]
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 \u0627\u0631\u0633\u0627\u0644 \u0628\u06cc\u0627\u0646\u06cc\u0647", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udcbc \u062f\u0627\u0631\u0627\u06cc\u06cc", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("\ud83d\udd25 \u062d\u0645\u0644\u0647", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("🌍 رول و خرابکاری", callback_data="sabotage"))
     return markup
 
-# دستورات مدیریتی
+# بکاپ گیری
 
+def save_backup():
+    with open(BACKUP_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            'player_data': player_data,
+            'player_assets': player_assets
+        }, f, ensure_ascii=False, indent=2)
+
+def start_backup_loop():
+    def loop():
+        while True:
+            save_backup()
+            time.sleep(600)
+    threading.Thread(target=loop, daemon=True).start()
+
+start_backup_loop()
+
+# ست کشور با ریپلای
 @bot.message_handler(commands=['setcountry'])
 def set_country(message):
-    if not is_owner(message) or not message.reply_to_message:
+    if not is_owner(message): return
+    if not message.reply_to_message:
+        bot.reply_to(message, "ریپلای کن روی پیام پلیر و اسم کشور رو بنویس")
         return
     try:
-        target_id = message.reply_to_message.from_user.id
-        country = message.text.split(None, 1)[1]
-        player_data[target_id] = country
+        country = message.text.split(" ", 1)[1]
+        user_id = message.reply_to_message.from_user.id
+        player_data[user_id] = country
         global allowed_chat_id
         allowed_chat_id = message.chat.id
-        bot.reply_to(message, f"\u06a9\u0634\u0648\u0631 {country} \u0628\u0631\u0627\u06cc {target_id} \u062b\u0628\u062a \u0634\u062f")
+        bot.reply_to(message, f"{country} ثبت شد برای {user_id}")
     except:
-        bot.reply_to(message, "\u0641\u0631\u0645\u062a \u0635\u062d\u06cc\u062d: /setcountry \u0628\u0627 \u0631\u06cc\u067e\u0644\u0627\u06cc")
+        bot.reply_to(message, "خطا در ثبت کشور")
 
+# ست دارایی با ریپلای روی متن
 @bot.message_handler(commands=['setassets'])
 def set_assets(message):
-    if not is_owner(message) or not message.reply_to_message:
+    if not is_owner(message): return
+    if not message.reply_to_message:
+        bot.reply_to(message, "ریپلای کن روی متن دارایی و اسم کشور رو بنویس")
         return
     try:
-        country = message.text.split(None, 1)[1]
-        target_id = None
+        country = message.text.split(" ", 1)[1]
+        target_user = None
         for uid, cname in player_data.items():
             if cname == country:
-                target_id = uid
+                target_user = uid
                 break
-        if not target_id:
-            bot.reply_to(message, "\u06a9\u0634\u0648\u0631 \u0645\u0648\u0631\u062f \u0646\u0638\u0631 \u067e\u06cc\u062f\u0627 \u0646\u0634\u062f")
+        if not target_user:
+            bot.reply_to(message, "کشور مورد نظر پیدا نشد")
             return
-        text = message.reply_to_message.text
-        player_assets[target_id] = text
-        bot.send_message(message.chat.id, f"\u062f\u0627\u0631\u0627\u06cc\u06cc \u0628\u0631\u0627\u06cc {country} \u0628\u0627 \u0645\u0648\u0641\u0642\u06cc\u062a \u062b\u0628\u062a \u0634\u062f")
-    except Exception as e:
-        bot.reply_to(message, f"\u062e\u0637\u0627: {str(e)}")
+        pending_assets[target_user] = message.reply_to_message.text
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{target_user}"))
+        markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{target_user}"))
+        bot.send_message(message.chat.id, f"متن دارایی:\n{message.reply_to_message.text}\n\nمورد تایید هست؟", reply_markup=markup)
+    except:
+        bot.reply_to(message, "خطا در ثبت دارایی")
 
 @bot.message_handler(commands=['on'])
 def turn_on(message):
     global bot_enabled
     if is_owner(message):
         bot_enabled = True
-        bot.reply_to(message, "\u2705 \u0631\u0628\u0627\u062a \u0631\u0648\u0634\u0646 \u0634\u062f")
+        bot.reply_to(message, "✅ ربات روشن شد")
 
 @bot.message_handler(commands=['off'])
 def turn_off(message):
     global bot_enabled
     if is_owner(message):
         bot_enabled = False
-        bot.reply_to(message, "\u26a0\ufe0f \u0631\u0628\u0627\u062a \u062e\u0627\u0645\u0648\u0634 \u0634\u062f")
+        bot.reply_to(message, "⚠️ ربات خاموش شد")
 
 @bot.message_handler(commands=['start', 'panel'])
 def send_menu(message):
     if not bot_enabled:
-        bot.reply_to(message, "\u26d4\ufe0f \u0631\u0628\u0627\u062a \u062e\u0627\u0645\u0648\u0634 \u0627\u0633\u062a")
+        bot.reply_to(message, "⛔️ ربات خاموش است")
         return
     if message.from_user.id in player_data and message.chat.id == allowed_chat_id:
-        bot.send_message(message.chat.id, "\u0628\u0647 \u067e\u0646\u0644 \u06af\u06cc\u0645 \u0645\u062a\u0646\u06cc \u062e\u0648\u0634 \u0622\u0645\u062f\u06cc\u062f", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
+
+# بیانیه
+@bot.callback_query_handler(func=lambda call: call.data == "statement")
+def handle_statement(call):
+    msg = bot.send_message(call.message.chat.id, "متن بیانیه خود را ارسال کنید:")
+    bot.register_next_step_handler(msg, process_statement)
+
+def process_statement(message):
+    pending_statements[message.from_user.id] = message.text
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ تایید", callback_data="confirm_statement"))
+    markup.add(types.InlineKeyboardButton("❌ لغو", callback_data="cancel_statement"))
+    bot.send_message(message.chat.id, f"{player_data[message.from_user.id]}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data in ["confirm_statement", "cancel_statement"])
+def confirm_statement_handler(call):
+    user_id = call.from_user.id
+    if call.data == "confirm_statement":
+        text = f"📢 بیانیه از کشور {player_data[user_id]}:\n{pending_statements[user_id]}"
+        bot.send_message(f"{CHANNEL_USERNAME}", text)
+        bot.send_message(call.message.chat.id, "✅ بیانیه ارسال شد", reply_markup=main_menu())
+    else:
+        bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu())
+    pending_statements.pop(user_id, None)
 
 # دارایی
+@bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_assets") or c.data.startswith("cancel_assets"))
+def confirm_assets_handler(call):
+    parts = call.data.split(":")
+    user_id = int(parts[1])
+    if call.data.startswith("confirm_assets"):
+        player_assets[user_id] = pending_assets.get(user_id, "ثبت نشده")
+        bot.send_message(call.message.chat.id, "✅ دارایی ثبت شد", reply_markup=main_menu())
+    else:
+        bot.send_message(call.message.chat.id, "❌ دارایی لغو شد", reply_markup=main_menu())
+    pending_assets.pop(user_id, None)
+
 @bot.callback_query_handler(func=lambda call: call.data == "assets")
 def handle_assets(call):
     user_id = call.from_user.id
-    text = player_assets.get(user_id, "\u26d4\ufe0f \u062f\u0627\u0631\u0627\u06cc\u06cc \u062b\u0628\u062a \u0646\u0634\u062f\u0647")
-    bot.send_message(call.message.chat.id, f"\ud83d\udce6 \u062f\u0627\u0631\u0627\u06cc\u06cc \u0634\u0645\u0627:\n{text}", reply_markup=main_menu())
+    text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
+    bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
-# بکاپ هر 10 دقیقه
+# حمله
+@bot.callback_query_handler(func=lambda call: call.data == "attack")
+def handle_attack(call):
+    msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور مورد حمله\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
+    bot.register_next_step_handler(msg, process_attack)
 
-def save_backup():
-    while True:
-        with open("backup_assets.json", "w", encoding="utf-8") as f1:
-            json.dump(player_assets, f1, ensure_ascii=False)
-        with open("backup_countries.json", "w", encoding="utf-8") as f2:
-            json.dump(player_data, f2, ensure_ascii=False)
-        time.sleep(600)  # 10 دقیقه
+def process_attack(message):
+    try:
+        lines = message.text.split('\n')
+        text = f"🚀 کشور {lines[0]} به {lines[1]} حمله کرد\nشهر: {lines[2]}\nمختصات: {lines[3]}\nتعداد موشک‌ها: {lines[4]}\nنوع موشک‌ها: {lines[5]}"
+        bot.send_message(f"{CHANNEL_USERNAME}", text)
+        bot.send_message(message.chat.id, "✅ حمله ثبت شد", reply_markup=main_menu())
+    except:
+        bot.send_message(message.chat.id, "❌ فرمت اشتباه است")
 
-threading.Thread(target=save_backup, daemon=True).start()
+# خرابکاری غیرفعال‌شده فعلاً
+@bot.callback_query_handler(func=lambda call: call.data == "sabotage")
+def handle_sabotage(call):
+    bot.send_message(call.message.chat.id, "❌ تحلیل هوش مصنوعی غیرفعال است", reply_markup=main_menu())
 
-# webhook
+# Webhook route
 @app.route('/', methods=['POST'])
 def webhook():
     if flask.request.headers.get('content-type') == 'application/json':
@@ -122,9 +192,9 @@ def webhook():
     else:
         flask.abort(403)
 
-# راه‌اندازی وبهوک
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
+
 print("ربات با webhook راه‌اندازی شد...")
 
 if __name__ == '__main__':
