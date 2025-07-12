@@ -34,33 +34,52 @@ def main_menu():
 def set_country(message):
     if not is_owner(message):
         return
-    if not message.reply_to_message:
+    if not message.reply_to_message or len(message.text.split()) < 2:
         bot.reply_to(message, "باید روی پیام پلیر ریپلای کنی و نام کشور رو بنویسی مثل /setcountry ایران")
         return
     try:
         user_id = message.reply_to_message.from_user.id
-        country = message.text.split(None, 1)[1]
+        country = message.text.split(None, 1)[1].strip()
+        if not country:
+            bot.reply_to(message, "⛔ نام کشور نمی‌تواند خالی باشد")
+            return
         player_data[user_id] = country
         country_groups[country] = message.chat.id
         bot.reply_to(message, f"✅ کشور {country} برای کاربر {user_id} ثبت شد و این گروه برای کشور ذخیره شد")
-    except:
-        bot.reply_to(message, "❌ خطا در پردازش فرمان")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در پردازش فرمان: {e}")
+
+@bot.message_handler(commands=['delcountry'])
+def delete_country(message):
+    if not is_owner(message):
+        return
+    if not message.reply_to_message:
+        bot.reply_to(message, "⛔ باید روی پیام پلیر ریپلای بزنی")
+        return
+    try:
+        user_id = message.reply_to_message.from_user.id
+        country = player_data.pop(user_id, None)
+        if country and country in country_groups:
+            del country_groups[country]
+        bot.reply_to(message, f"✅ کشور {country or 'نامشخص'} برای کاربر {user_id} حذف شد")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در حذف کشور: {e}")
 
 @bot.message_handler(commands=['setassets'])
 def set_assets(message):
     if not is_owner(message):
         return
-    if not message.reply_to_message:
+    if not message.reply_to_message or len(message.text.split()) < 2:
         bot.reply_to(message, "باید روی پیام حاوی دارایی ریپلای کنی و نام کشور رو بزنی مثل /setassets ایران")
         return
     try:
-        if len(message.text.split()) < 2:
-            bot.reply_to(message, "⛔ لطفا نام کشور را بنویسید مثل /setassets ایران")
+        country = message.text.split(None, 1)[1].strip()
+        if not country:
+            bot.reply_to(message, "⛔ نام کشور نمی‌تواند خالی باشد")
             return
-        country = message.text.split(None, 1)[1]
         user_id = None
         for uid, cname in player_data.items():
-            if cname == country:
+            if cname.lower() == country.lower():
                 user_id = uid
                 break
         if not user_id:
@@ -75,8 +94,8 @@ def set_assets(message):
         markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{user_id}"))
         markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{user_id}"))
         bot.send_message(message.chat.id, f"متن دارایی:\n{asset_text}\n\nمورد تایید هست؟", reply_markup=markup)
-    except:
-        bot.reply_to(message, "❌ خطا در پردازش فرمان")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در پردازش فرمان: {e}")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_assets") or c.data.startswith("cancel_assets"))
 def confirm_assets_handler(call):
