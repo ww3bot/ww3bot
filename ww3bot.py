@@ -2,20 +2,18 @@ import os
 import telebot
 from telebot import types
 import flask
-import openai
-import re
+import requests
 
 # محیط
 TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
-OWNER_ID2 = int(os.environ.get("OWNER_ID2", 0))
+OWNER_ID2 = int(os.environ.get("OWNER_ID2"))
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
-openai.api_key = OPENAI_API_KEY
 
 player_data = {}  # user_id -> country
 pending_statements = {}
@@ -88,6 +86,33 @@ def send_menu(message):
     if message.from_user.id in player_data and message.chat.id == allowed_chat_id:
         bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
 
+@bot.message_handler(commands=['up'])
+def upgrade_assets(message):
+    user_id = message.from_user.id
+    if user_id not in player_assets:
+        bot.reply_to(message, "⛔ دارایی برای شما ثبت نشده")
+        return
+    lines = player_assets[user_id].split('\n')
+    new_lines = []
+    for line in lines:
+        if '[' in line and ']' in line and ':' in line:
+            try:
+                before_colon = line.split(':')[0]
+                after_colon = line.split(':')[1].strip()
+                bracket_part = before_colon.split('[')[-1].split(']')[0].strip()
+                boost = int(bracket_part)
+                label = before_colon.split('[')[0].strip()
+                current_value = int(after_colon)
+                new_value = current_value + boost
+                new_line = f"{label}[{boost}]: {new_value}"
+                new_lines.append(new_line)
+            except:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    player_assets[user_id] = '\n'.join(new_lines)
+    bot.reply_to(message, "✅ بازدهی اعمال شد")
+
 # بیانیه
 @bot.callback_query_handler(func=lambda call: call.data == "statement")
 def handle_statement(call):
@@ -112,7 +137,6 @@ def confirm_statement_handler(call):
         bot.send_message(call.message.chat.id, "❌ بیانیه لغو شد", reply_markup=main_menu())
     pending_statements.pop(user_id, None)
 
-# دارایی
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_assets") or c.data.startswith("cancel_assets"))
 def confirm_assets_handler(call):
     parts = call.data.split(":")
@@ -130,38 +154,6 @@ def handle_assets(call):
     text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
     bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
-@bot.message_handler(commands=['up'])
-def handle_up(message):
-    user_id = message.from_user.id
-    if user_id not in player_assets:
-        bot.send_message(message.chat.id, "⛔ دارایی برای شما ثبت نشده")
-        return
-
-    updated_lines = []
-    changed = False
-    for line in player_assets[user_id].splitlines():
-        match = re.search(r"^(.*)\[(\d+)\]\s*:\s*(\d+)", line)
-        if match:
-            title = match.group(1).strip()
-            efficiency = int(match.group(2))
-            value = int(match.group(3))
-            if efficiency > 0:
-                new_value = value + efficiency
-                updated_line = f"{title}[{efficiency}]: {new_value}"
-                changed = True
-            else:
-                updated_line = line
-        else:
-            updated_line = line
-        updated_lines.append(updated_line)
-
-    player_assets[user_id] = "\n".join(updated_lines)
-    if changed:
-        bot.send_message(message.chat.id, "✅ بازدهی اعمال شد", reply_markup=main_menu())
-    else:
-        bot.send_message(message.chat.id, "ℹ️ بازدهی‌ای برای اعمال وجود نداشت", reply_markup=main_menu())
-
-# حمله
 @bot.callback_query_handler(func=lambda call: call.data == "attack")
 def handle_attack(call):
     msg = bot.send_message(call.message.chat.id, "⬇️ اطلاعات حمله را به ترتیب ارسال کنید:\nکشور حمله‌کننده\nکشور مورد حمله\nشهر\nمختصات\nتعداد موشک\nنوع موشک")
@@ -176,27 +168,34 @@ def process_attack(message):
     except:
         bot.send_message(message.chat.id, "❌ فرمت اشتباه است")
 
-# خرابکاری + هوش مصنوعی
 @bot.callback_query_handler(func=lambda call: call.data == "sabotage")
 def handle_sabotage(call):
     msg = bot.send_message(call.message.chat.id, "رول خود را وارد کنید تا تحلیل شود:")
     bot.register_next_step_handler(msg, analyze_sabotage)
 
 def analyze_sabotage(message):
-    prompt = f"این یک رول خرابکاری در یک بازی جنگی است:\n\"{message.text}\"\nلطفاً نتیجه این رول را بر اساس مفاهیم خرابکاری و نفوذ تحلیل کن."
+    text = message.text
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}"
+    }
+    payload = {
+        "inputs": f"رول نظامی:\n{text}\nتحلیل:"
+    }
     try:
-        completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "تو یک تحلیلگر نظامی هستی"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300
+        response = requests.post(
+            "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
+            headers=headers,
+            json=payload,
+            timeout=60
         )
-        reply = completion['choices'][0]['message']['content']
-        bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{reply}", reply_markup=main_menu())
+        if response.status_code == 200:
+            result = response.json()
+            generated = result[0]["generated_text"].split("تحلیل:")[-1].strip()
+            bot.send_message(message.chat.id, f"🔍 تحلیل رول شما:\n{generated}", reply_markup=main_menu())
+        else:
+            bot.send_message(message.chat.id, f"❌ خطا در تحلیل:\n{response.text}", reply_markup=main_menu())
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
+        bot.send_message(message.chat.id, f"❌ خطا در ارتباط با HuggingFace:\n{str(e)}", reply_markup=main_menu())
 
 @app.route('/', methods=['POST'])
 def webhook():
