@@ -14,10 +14,10 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 bot = telebot.TeleBot(TOKEN)
 app = flask.Flask(__name__)
 
-player_data = {}  # user_id -> country
-country_groups = {}  # country -> group chat id
-player_assets = {}  # user_id -> asset text
-pending_assets = {}  # user_id -> asset text
+player_data = {}
+country_groups = {}
+player_assets = {}
+pending_assets = {}
 bot_enabled = True
 
 def is_owner(message):
@@ -54,6 +54,9 @@ def set_assets(message):
         bot.reply_to(message, "باید روی پیام حاوی دارایی ریپلای کنی و نام کشور رو بزنی مثل /setassets ایران")
         return
     try:
+        if len(message.text.split()) < 2:
+            bot.reply_to(message, "⛔ لطفا نام کشور را بنویسید مثل /setassets ایران")
+            return
         country = message.text.split(None, 1)[1]
         user_id = None
         for uid, cname in player_data.items():
@@ -63,11 +66,15 @@ def set_assets(message):
         if not user_id:
             bot.reply_to(message, "⛔ کشور مورد نظر یافت نشد")
             return
-        pending_assets[user_id] = message.reply_to_message.text
+        asset_text = message.reply_to_message.text.strip()
+        if not asset_text:
+            bot.reply_to(message, "⛔ متن دارایی خالی است")
+            return
+        pending_assets[user_id] = asset_text
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("✅ تایید", callback_data=f"confirm_assets:{user_id}"))
         markup.add(types.InlineKeyboardButton("❌ لغو", callback_data=f"cancel_assets:{user_id}"))
-        bot.send_message(message.chat.id, f"متن دارایی:\n{message.reply_to_message.text}\n\nمورد تایید هست؟", reply_markup=markup)
+        bot.send_message(message.chat.id, f"متن دارایی:\n{asset_text}\n\nمورد تایید هست؟", reply_markup=markup)
     except:
         bot.reply_to(message, "❌ خطا در پردازش فرمان")
 
