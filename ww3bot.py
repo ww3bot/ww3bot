@@ -3,10 +3,12 @@ import telebot
 from telebot import types
 import flask
 import openai
+import re
 
 # محیط
 TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
+OWNER_ID2 = int(os.environ.get("OWNER_ID2", 0))
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -24,7 +26,7 @@ bot_enabled = True
 
 # ابزار
 def is_owner(message):
-    return message.from_user.id == OWNER_ID
+    return message.from_user.id in [OWNER_ID, OWNER_ID2]
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
@@ -128,6 +130,37 @@ def handle_assets(call):
     text = player_assets.get(user_id, "⛔ دارایی ثبت نشده")
     bot.send_message(call.message.chat.id, f"📦 دارایی شما:\n{text}", reply_markup=main_menu())
 
+@bot.message_handler(commands=['up'])
+def handle_up(message):
+    user_id = message.from_user.id
+    if user_id not in player_assets:
+        bot.send_message(message.chat.id, "⛔ دارایی برای شما ثبت نشده")
+        return
+
+    updated_lines = []
+    changed = False
+    for line in player_assets[user_id].splitlines():
+        match = re.search(r"^(.*)\[(\d+)\]\s*:\s*(\d+)", line)
+        if match:
+            title = match.group(1).strip()
+            efficiency = int(match.group(2))
+            value = int(match.group(3))
+            if efficiency > 0:
+                new_value = value + efficiency
+                updated_line = f"{title}[{efficiency}]: {new_value}"
+                changed = True
+            else:
+                updated_line = line
+        else:
+            updated_line = line
+        updated_lines.append(updated_line)
+
+    player_assets[user_id] = "\n".join(updated_lines)
+    if changed:
+        bot.send_message(message.chat.id, "✅ بازدهی اعمال شد", reply_markup=main_menu())
+    else:
+        bot.send_message(message.chat.id, "ℹ️ بازدهی‌ای برای اعمال وجود نداشت", reply_markup=main_menu())
+
 # حمله
 @bot.callback_query_handler(func=lambda call: call.data == "attack")
 def handle_attack(call):
@@ -165,7 +198,6 @@ def analyze_sabotage(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطا در تحلیل هوش مصنوعی:\n{str(e)}", reply_markup=main_menu())
 
-# Webhook route
 @app.route('/', methods=['POST'])
 def webhook():
     if flask.request.headers.get('content-type') == 'application/json':
@@ -176,12 +208,10 @@ def webhook():
     else:
         flask.abort(403)
 
-# تنظیم webhook
 bot.remove_webhook()
 bot.set_webhook(url=WEBHOOK_URL)
 
 print("ربات با webhook راه‌اندازی شد...")
 
-# این خط ربات رو زنده نگه‌میداره روی Render
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
