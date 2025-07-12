@@ -20,10 +20,9 @@ player_data = {}  # user_id -> country
 pending_statements = {}
 pending_assets = {}
 player_assets = {}
-allowed_chat_id = None
 bot_enabled = True
-message_steps = {}  # برای ارسال پیام بین کشورها
-country_groups = {}  # کشور -> آیدی گروه تلگرام
+message_steps = {}  # user_id -> step
+message_targets = {}  # user_id -> target country
 
 # ابزار
 def is_owner(message):
@@ -46,8 +45,8 @@ def set_country(message):
         return
     try:
         user_id = message.reply_to_message.from_user.id
-        country = message.text.split(None, 1)[1].strip()
-        player_data[user_id] = country
+        country = message.text.split(None, 1)[1]
+        player_data[user_id] = country.strip()
         bot.reply_to(message, f"✅ کشور {country} برای کاربر {user_id} ثبت شد")
     except:
         bot.reply_to(message, "خطا در پردازش فرمان")
@@ -63,7 +62,7 @@ def set_assets(message):
         user_id = None
         country = message.text.split(None, 1)[1].strip()
         for uid, cname in player_data.items():
-            if cname.strip().lower() == country.lower():
+            if cname.strip() == country:
                 user_id = uid
                 break
         if not user_id:
@@ -118,7 +117,7 @@ def process_statement(message):
 def confirm_statement_handler(call):
     user_id = call.from_user.id
     if call.data == "confirm_statement":
-        text = f"📢 بیانیه از کشور {player_data.get(user_id, 'نامشخص')}:\n{pending_statements[user_id]}"
+        text = f"📢 بیانیه از کشور {player_data[user_id]}:\n{pending_statements[user_id]}"
         bot.send_message(f"{CHANNEL_USERNAME}", text)
         bot.send_message(call.message.chat.id, "✅ بیانیه ارسال شد", reply_markup=main_menu())
     else:
@@ -173,37 +172,47 @@ def handle_up(message):
 
 # ارسال پیام بین کشورها
 @bot.callback_query_handler(func=lambda c: c.data == "send_message")
-def send_message_start(call):
-    bot.send_message(call.message.chat.id, "نام کشور مورد نظر را وارد کنید:")
-    message_steps[call.from_user.id] = {"step": "awaiting_country"}
+def handle_send_message(call):
+    user_id = call.from_user.id
+    message_steps[user_id] = "ask_country"
+    bot.send_message(call.message.chat.id, "✏️ اسم کشور مقصد را وارد کنید:")
 
 @bot.message_handler(func=lambda m: m.from_user.id in message_steps)
-def handle_country_or_text(m):
-    step_info = message_steps[m.from_user.id]
-    if step_info["step"] == "awaiting_country":
-        target_country = m.text.strip()
-        group_id = None
+def handle_message_step(message):
+    user_id = message.from_user.id
+    step = message_steps.get(user_id)
+
+    if step == "ask_country":
+        target_country = message.text.strip()
+        found = False
         for uid, cname in player_data.items():
-            if cname.strip().lower() == target_country.lower():
-                group_id = uid  # فرض می‌کنیم کاربر گیرنده همان گروه کشور است
+            if cname == target_country:
+                message_targets[user_id] = target_country
+                message_steps[user_id] = "ask_text"
+                bot.send_message(message.chat.id, "✅ حالا متن پیام خود را بنویسید:")
+                found = True
                 break
-        if not group_id:
-            bot.send_message(m.chat.id, "⛔ کشور یافت نشد")
-            message_steps.pop(m.from_user.id, None)
-            return
-        message_steps[m.from_user.id] = {
-            "step": "awaiting_text",
-            "target_user": group_id,
-            "target_country": target_country
-        }
-        bot.send_message(m.chat.id, "✅ حالا متن پیام خود را بنویسید:")
-    elif step_info["step"] == "awaiting_text":
-        text = m.text
-        sender_country = player_data.get(m.from_user.id, "نامشخص")
-        final_msg = f"📨 پیام از طرف کشور {sender_country}:\n{text}"
-        bot.send_message(step_info["target_user"], final_msg)
-        bot.send_message(m.chat.id, "✅ پیام ارسال شد", reply_markup=main_menu())
-        message_steps.pop(m.from_user.id, None)
+        if not found:
+            message_steps.pop(user_id, None)
+            bot.send_message(message.chat.id, "⛔ کشور یافت نشد")
+
+    elif step == "ask_text":
+        target_country = message_targets.get(user_id)
+        text = message.text
+        sender_country = player_data.get(user_id, "نامشخص")
+        found = False
+        for uid, cname in player_data.items():
+            if cname == target_country:
+                final_msg = f"📨 پیام از طرف کشور {sender_country}:\n{text}"
+                bot.send_message(uid, final_msg)
+                found = True
+                break
+        if found:
+            bot.send_message(message.chat.id, "✅ پیام ارسال شد", reply_markup=main_menu())
+        else:
+            bot.send_message(message.chat.id, "⛔ خطا در ارسال پیام")
+        message_steps.pop(user_id, None)
+        message_targets.pop(user_id, None)
 
 # بکاپ‌گیری
 BACKUP_FILE = "backup.json"
@@ -215,7 +224,7 @@ def backup_data():
                 json.dump({"countries": player_data, "assets": player_assets}, f, ensure_ascii=False)
         except Exception as e:
             print("خطا در بکاپ گیری:", e)
-        time.sleep(600)
+        time.sleep(600)  # هر 10 دقیقه
 
 threading.Thread(target=backup_data, daemon=True).start()
 
