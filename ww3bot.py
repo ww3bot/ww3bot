@@ -20,10 +20,7 @@ player_data = {}  # user_id -> country
 pending_statements = {}
 pending_assets = {}
 player_assets = {}
-pending_messages = {}  # user_id -> {'step': 1, 'to_country': None}
-
-country_chats = {}  # example: {'ایران': -1001234567890, 'روسیه': -1009876543210}
-
+pending_message_country = {}  # user_id -> dest country
 bot_enabled = True
 
 # ابزار
@@ -32,10 +29,10 @@ def is_owner(message):
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📃 ارسال بیانیه", callback_data="statement"))
-    markup.add(types.InlineKeyboardButton("💼 دارایی", callback_data="assets"))
-    markup.add(types.InlineKeyboardButton("🔥 حمله", callback_data="attack"))
-    markup.add(types.InlineKeyboardButton("📨 ارسال پیام", callback_data="send_message"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udcc3 ارسال بیانیه", callback_data="statement"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udcbc دارایی", callback_data="assets"))
+    markup.add(types.InlineKeyboardButton("\ud83d\udd25 حمله", callback_data="attack"))
+    markup.add(types.InlineKeyboardButton("✉️ ارسال پیام", callback_data="send_message"))
     return markup
 
 # ست کشور
@@ -47,7 +44,7 @@ def set_country(message):
         return
     try:
         user_id = message.reply_to_message.from_user.id
-        country = message.text.split(None, 1)[1]
+        country = message.text.split(None, 1)[1].strip()
         player_data[user_id] = country
         bot.reply_to(message, f"✅ کشور {country} برای کاربر {user_id} ثبت شد")
     except:
@@ -62,9 +59,9 @@ def set_assets(message):
         return
     try:
         user_id = None
-        country = message.text.split(None, 1)[1]
+        country = message.text.split(None, 1)[1].strip().lower()
         for uid, cname in player_data.items():
-            if cname == country:
+            if cname.strip().lower() == country:
                 user_id = uid
                 break
         if not user_id:
@@ -99,8 +96,7 @@ def send_menu(message):
     if not bot_enabled:
         bot.reply_to(message, "⛔ ربات خاموش است")
         return
-    if message.from_user.id in player_data:
-        bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
+    bot.send_message(message.chat.id, "به پنل گیم متنی خوش آمدید", reply_markup=main_menu())
 
 # بیانیه
 @bot.callback_query_handler(func=lambda call: call.data == "statement")
@@ -113,7 +109,8 @@ def process_statement(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ تایید", callback_data="confirm_statement"))
     markup.add(types.InlineKeyboardButton("❌ لغو", callback_data="cancel_statement"))
-    bot.send_message(message.chat.id, f"{player_data[message.from_user.id]}\n{message.text}\n\nمورد تایید است؟", reply_markup=markup)
+    bot.send_message(message.chat.id, f"{player_data.get(message.from_user.id, 'کشور ثبت نشده')}
+{message.text}\n\nمورد تایید است؟", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data in ["confirm_statement", "cancel_statement"])
 def confirm_statement_handler(call):
@@ -172,39 +169,37 @@ def handle_up(message):
     player_assets[user_id] = updated_text
     bot.send_message(message.chat.id, f"📈 دارایی با بازدهی به‌روز شد:\n{updated_text}", reply_markup=main_menu())
 
-# ارسال پیام بین کشورها
-@bot.callback_query_handler(func=lambda call: call.data == "send_message")
+# ارسال پیام
+@bot.callback_query_handler(func=lambda c: c.data == "send_message")
 def handle_send_message(call):
-    user_id = call.from_user.id
-    pending_messages[user_id] = {'step': 1}
-    msg = bot.send_message(call.message.chat.id, "📨 نام کشوری که می‌خواهید پیام به آن ارسال شود را بنویسید:")
-    bot.register_next_step_handler(msg, process_message_step)
+    msg = bot.send_message(call.message.chat.id, "نام کشور مقصد را وارد کنید:")
+    bot.register_next_step_handler(msg, ask_message_content)
 
-def process_message_step(message):
-    user_id = message.from_user.id
-    if user_id not in pending_messages:
+def ask_message_content(message):
+    sender_id = message.from_user.id
+    dest_country = message.text.strip().lower()
+    found = None
+    for uid, cname in player_data.items():
+        if cname.strip().lower() == dest_country:
+            found = uid
+            break
+    if not found:
+        bot.send_message(message.chat.id, "⛔ کشور یافت نشد")
         return
-    state = pending_messages[user_id]
+    pending_message_country[sender_id] = found
+    msg = bot.send_message(message.chat.id, "متن پیام خود را وارد کنید:")
+    bot.register_next_step_handler(msg, send_message_to_country)
 
-    if state['step'] == 1:
-        country_name = message.text.strip()
-        if country_name not in country_chats:
-            bot.send_message(message.chat.id, "⛔ کشور مورد نظر یافت نشد")
-            pending_messages.pop(user_id, None)
-            return
-        state['to_country'] = country_name
-        state['step'] = 2
-        msg = bot.send_message(message.chat.id, "📝 متن پیام خود را بنویسید:")
-        bot.register_next_step_handler(msg, process_message_step)
-
-    elif state['step'] == 2:
-        to_country = state['to_country']
-        to_chat_id = country_chats[to_country]
-        from_country = player_data.get(user_id, "نامشخص")
-        text = message.text.strip()
-        bot.send_message(to_chat_id, f"📨 پیامی از کشور {from_country} برای شما:\n{text}")
-        bot.send_message(message.chat.id, "✅ پیام شما ارسال شد", reply_markup=main_menu())
-        pending_messages.pop(user_id, None)
+def send_message_to_country(message):
+    sender_id = message.from_user.id
+    dest_id = pending_message_country.get(sender_id)
+    if not dest_id:
+        bot.send_message(message.chat.id, "⛔ خطا در ارسال پیام")
+        return
+    sender_country = player_data.get(sender_id, "نامشخص")
+    bot.send_message(dest_id, f"📨 پیام از کشور {sender_country} دارید:\nمتن پیام: {message.text}")
+    bot.send_message(message.chat.id, "✅ پیام ارسال شد", reply_markup=main_menu())
+    pending_message_country.pop(sender_id, None)
 
 # بکاپ‌گیری
 BACKUP_FILE = "backup.json"
@@ -216,7 +211,7 @@ def backup_data():
                 json.dump({"countries": player_data, "assets": player_assets}, f, ensure_ascii=False)
         except Exception as e:
             print("خطا در بکاپ گیری:", e)
-        time.sleep(600)
+        time.sleep(600)  # هر 10 دقیقه
 
 threading.Thread(target=backup_data, daemon=True).start()
 
