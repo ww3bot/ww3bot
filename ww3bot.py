@@ -2,7 +2,7 @@ import telebot
 from telebot import types
 import os
 
-TOKEN = os.getenv("TOKEN_ID")
+TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 OWNER_ID = int(os.getenv("OWNER_ID"))
 
