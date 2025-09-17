@@ -159,12 +159,14 @@ bot_instance = ChannelManagerBot()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دستور شروع"""
     user_id = update.effective_user.id
+    chat = update.effective_chat
     
-    if user_id != OWNER_ID:
+    if user_id != OWNER_ID and chat.type == 'private':
         await update.message.reply_text("❌ شما دسترسی به این بات ندارید!")
         return
     
-    welcome_text = f"""
+    if chat.type == 'private':
+        welcome_text = f"""
 🤖 سلام مالک عزیز!
 
 به بات مدیریت کانال خوش آمدید!
@@ -182,9 +184,105 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - راهنما
 
 برای شروع از دستور /panel استفاده کنید.
-    """
+        """
+        
+        await update.message.reply_text(welcome_text)
     
-    await update.message.reply_text(welcome_text)
+    elif chat.type == 'channel':
+        # بات به کانال اضافه شده
+        try:
+            member_count = await context.bot.get_chat_member_count(chat.id)
+            bot_instance.add_channel(chat.id, chat.title, chat.username)
+            
+            # به‌روزرسانی تعداد اعضا
+            conn = sqlite3.connect(bot_instance.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE channels SET member_count = ?, last_update = CURRENT_TIMESTAMP
+                WHERE channel_id = ?
+            ''', (member_count, chat.id))
+            conn.commit()
+            conn.close()
+            
+            # اطلاع به مالک
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"✅ کانال جدید شناسایی شد!\n\n"
+                     f"📢 نام: {chat.title}\n"
+                     f"🔗 آیدی: {chat.id}\n"
+                     f"👥 اعضا: {member_count:,}\n"
+                     f"📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            
+        except Exception as e:
+            logger.error(f"خطا در شناسایی کانال: {e}")
+
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تشخیص تغییرات عضویت بات در کانال‌ها"""
+    result = update.my_chat_member
+    chat = result.chat
+    new_member = result.new_chat_member
+    old_member = result.old_chat_member
+    
+    # فقط برای کانال‌ها
+    if chat.type != 'channel':
+        return
+    
+    # اگر بات ادمین شد
+    if (new_member.status in ['administrator'] and 
+        old_member.status in ['left', 'kicked', 'member']):
+        
+        try:
+            member_count = await context.bot.get_chat_member_count(chat.id)
+            bot_instance.add_channel(chat.id, chat.title, chat.username)
+            
+            # به‌روزرسانی تعداد اعضا
+            conn = sqlite3.connect(bot_instance.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE channels SET member_count = ?, last_update = CURRENT_TIMESTAMP
+                WHERE channel_id = ?
+            ''', (member_count, chat.id))
+            conn.commit()
+            conn.close()
+            
+            # اطلاع به مالک
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=f"🎉 بات به کانال جدید اضافه شد!\n\n"
+                     f"📢 نام: {chat.title}\n"
+                     f"🔗 آیدی: {chat.id}\n"
+                     f"👥 اعضا: {member_count:,}\n"
+                     f"📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                     f"✅ کانال در دیتابیس ثبت شد!"
+            )
+            
+        except Exception as e:
+            logger.error(f"خطا در ثبت کانال جدید: {e}")
+    
+    # اگر بات از کانال حذف شد
+    elif (new_member.status in ['left', 'kicked'] and 
+          old_member.status in ['administrator', 'member']):
+        
+        # غیرفعال کردن کانال در دیتابیس
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE channels SET is_active = 0, last_update = CURRENT_TIMESTAMP
+            WHERE channel_id = ?
+        ''', (chat.id,))
+        conn.commit()
+        conn.close()
+        
+        # اطلاع به مالک
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"⚠️ بات از کانال حذف شد!\n\n"
+                 f"📢 نام: {chat.title}\n"
+                 f"🔗 آیدی: {chat.id}\n"
+                 f"📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                 f"❌ کانال غیرفعال شد."
+        )
 
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """پنل مدیریت اصلی"""
@@ -530,6 +628,45 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(channel_text, reply_markup=reply_markup)
 
+async def scan_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اسکن و شناسایی کانال‌های موجود"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    await update.message.reply_text("🔍 در حال اسکن کانال‌ها...")
+    
+    try:
+        # دریافت لیست چت‌های بات (محدود به تلگرام)
+        # این روش کار نمی‌کند، پس از کاربر می‌خواهیم آیدی کانال‌ها را بدهد
+        
+        scan_text = """
+🔍 برای شناسایی کانال‌ها:
+
+1️⃣ روش خودکار:
+• بات را به کانال اضافه کنید
+• ادمین کنید (با دسترسی پیام)
+• خودکار شناسایی می‌شود
+
+2️⃣ روش دستی:
+• از دستور /info [channel_id] استفاده کنید
+• مثال: /info -1001234567890
+
+3️⃣ دریافت آیدی کانال:
+• به کانال برید
+• @userinfobot را فوروارد کنید
+• آیدی را کپی کنید
+
+💡 نکته: بات باید ادمین کانال باشد تا بتواند آمار دریافت کند.
+        """
+        
+        await update.message.reply_text(scan_text)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در اسکن: {str(e)}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """راهنمای استفاده"""
     user_id = update.effective_user.id
@@ -546,6 +683,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /panel - پنل مدیریت
 /stats - آمار کانال‌ها
 /channels - لیست کانال‌ها
+/scan - اسکن کانال‌ها
 /help - این راهنما
 
 📝 دستورات پست:
@@ -556,6 +694,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • بات را به کانال اضافه کرده و ادمین کنید
 • برای دریافت آیدی کانال از @userinfobot استفاده کنید
 • آیدی کانال‌های عمومی با -100 شروع می‌شود
+• بات خودکار کانال‌ها را شناسایی می‌کند
 
 📞 پشتیبانی:
 در صورت بروز مشکل با سازنده تماس بگیرید.
@@ -583,8 +722,13 @@ def main():
     application.add_handler(CommandHandler("channels", channels_command))
     application.add_handler(CommandHandler("send", send_to_channel))
     application.add_handler(CommandHandler("info", get_channel_info))
+    application.add_handler(CommandHandler("scan", scan_channels))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
+    
+    # هندلر برای تشخیص تغییرات عضویت بات
+    from telegram.ext import ChatMemberHandler
+    application.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     
     # اجرای بات
     logger.info("بات مدیریت کانال شروع به کار کرد...")
