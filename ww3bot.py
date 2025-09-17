@@ -525,7 +525,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 میانگین بازدید هر پست: {total_views//total_posts if total_posts > 0 else 0}
         """
         
-        await query.edit_message_text(stats_text)
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(stats_text, reply_markup=reply_markup)
     
     elif data == "manage_posts":
         keyboard = [
@@ -569,6 +572,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
     
+    elif data == "reports":
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        # گزارش هفتگی
+        cursor.execute('''
+            SELECT 
+                SUM(new_members) as new_members,
+                SUM(left_members) as left_members,
+                SUM(posts_count) as posts_count,
+                COUNT(DISTINCT channel_id) as active_channels
+            FROM daily_stats 
+            WHERE date >= date('now', '-7 days')
+        ''')
+        weekly_data = cursor.fetchone()
+        
+        # گزارش ماهانه
+        cursor.execute('''
+            SELECT 
+                SUM(new_members) as new_members,
+                SUM(left_members) as left_members,
+                SUM(posts_count) as posts_count
+            FROM daily_stats 
+            WHERE date >= date('now', '-30 days')
+        ''')
+        monthly_data = cursor.fetchone()
+        
+        # بهترین کانال‌ها
+        cursor.execute('''
+            SELECT channel_name, member_count 
+            FROM channels 
+            WHERE is_active = 1 
+            ORDER BY member_count DESC 
+            LIMIT 3
+        ''')
+        top_channels = cursor.fetchall()
+        
+        conn.close()
+        
+        report_text = f"""
+📈 گزارش عملکرد:
+
+📊 آمار هفته گذشته:
+➕ عضو جدید: {weekly_data[0] or 0}
+➖ خروج: {weekly_data[1] or 0}
+📝 پست جدید: {weekly_data[2] or 0}
+📢 کانال فعال: {weekly_data[3] or 0}
+
+📅 آمار ماه گذشته:
+➕ عضو جدید: {monthly_data[0] or 0}
+➖ خروج: {monthly_data[1] or 0}
+📝 پست جدید: {monthly_data[2] or 0}
+
+🏆 برترین کانال‌ها:
+"""
+        
+        for i, (name, count) in enumerate(top_channels, 1):
+            report_text += f"{i}. {name}: {count:,} عضو\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(report_text, reply_markup=reply_markup)
+    
     elif data == "refresh_data":
         await query.edit_message_text("🔄 در حال به‌روزرسانی اطلاعات...")
         
@@ -593,10 +660,186 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         conn.close()
         
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await query.edit_message_text(
             f"✅ اطلاعات به‌روزرسانی شد!\n"
-            f"📊 {updated_count} کانال به‌روزرسانی شد."
+            f"📊 {updated_count} کانال به‌روزرسانی شد.",
+            reply_markup=reply_markup
         )
+    
+    # دکمه‌های بازگشت
+    elif data == "back_main":
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 آمار کانال‌ها", callback_data="stats_channels"),
+                InlineKeyboardButton("📝 مدیریت پست‌ها", callback_data="manage_posts")
+            ],
+            [
+                InlineKeyboardButton("👥 مدیریت اعضا", callback_data="manage_members"),
+                InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")
+            ],
+            [
+                InlineKeyboardButton("📈 گزارش‌ها", callback_data="reports"),
+                InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="refresh_data")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🎛️ پنل مدیریت کانال\n\nگزینه مورد نظر را انتخاب کنید:",
+            reply_markup=reply_markup
+        )
+    
+    # دکمه‌های مدیریت پست‌ها
+    elif data == "new_post":
+        await query.edit_message_text(
+            "📝 برای ارسال پست جدید از دستور زیر استفاده کنید:\n\n"
+            "/send [channel_id] [متن پیام]\n\n"
+            "مثال:\n"
+            "/send -1001234567890 سلام دوستان!"
+        )
+    
+    elif data == "list_posts":
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT p.content, p.created_at, c.channel_name, p.views
+            FROM posts p
+            JOIN channels c ON p.channel_id = c.channel_id
+            ORDER BY p.created_at DESC
+            LIMIT 10
+        ''')
+        posts = cursor.fetchall()
+        conn.close()
+        
+        if posts:
+            posts_text = "📋 آخرین پست‌ها:\n\n"
+            for content, created_at, channel_name, views in posts:
+                short_content = content[:50] + "..." if len(content) > 50 else content
+                posts_text += f"📢 {channel_name}\n"
+                posts_text += f"📝 {short_content}\n"
+                posts_text += f"👁️ {views} بازدید | 📅 {created_at[:16]}\n\n"
+        else:
+            posts_text = "هیچ پستی یافت نشد!"
+        
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="manage_posts")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(posts_text, reply_markup=reply_markup)
+    
+    elif data == "scheduled_posts":
+        await query.edit_message_text(
+            "⏰ قابلیت زمان‌بندی پست در نسخه بعدی اضافه خواهد شد!\n\n"
+            "فعلاً می‌توانید از دستور /send استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="manage_posts")]])
+        )
+    
+    # دکمه‌های مدیریت اعضا
+    elif data == "member_stats":
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                c.channel_name,
+                c.member_count,
+                COALESCE(SUM(d.new_members), 0) as weekly_new,
+                COALESCE(SUM(d.left_members), 0) as weekly_left
+            FROM channels c
+            LEFT JOIN daily_stats d ON c.channel_id = d.channel_id 
+                AND d.date >= date('now', '-7 days')
+            WHERE c.is_active = 1
+            GROUP BY c.channel_id, c.channel_name, c.member_count
+            ORDER BY c.member_count DESC
+        ''')
+        member_data = cursor.fetchall()
+        conn.close()
+        
+        if member_data:
+            member_text = "👥 آمار اعضای کانال‌ها:\n\n"
+            for name, total, new, left in member_data:
+                member_text += f"📢 {name}\n"
+                member_text += f"👥 کل اعضا: {total:,}\n"
+                member_text += f"➕ عضو جدید (هفته): {new}\n"
+                member_text += f"➖ خروج (هفته): {left}\n"
+                member_text += f"📈 رشد خالص: {new - left}\n\n"
+        else:
+            member_text = "اطلاعات آماری یافت نشد!"
+        
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="manage_members")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(member_text, reply_markup=reply_markup)
+    
+    elif data == "growth_chart":
+        await query.edit_message_text(
+            "📈 نمودار رشد در نسخه بعدی اضافه خواهد شد!\n\n"
+            "فعلاً می‌توانید از آمار اعضا استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="manage_members")]])
+        )
+    
+    elif data == "search_user":
+        await query.edit_message_text(
+            "🔍 قابلیت جستجوی کاربر در نسخه بعدی اضافه خواهد شد!\n\n"
+            "فعلاً می‌توانید از آمار کلی استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="manage_members")]])
+        )
+    
+    # دکمه‌های تنظیمات
+    elif data == "channel_settings":
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_name, is_active FROM channels ORDER BY channel_name')
+        channels = cursor.fetchall()
+        conn.close()
+        
+        if channels:
+            settings_text = "🔧 تنظیمات کانال‌ها:\n\n"
+            for name, is_active in channels:
+                status = "✅ فعال" if is_active else "❌ غیرفعال"
+                settings_text += f"📢 {name}: {status}\n"
+        else:
+            settings_text = "هیچ کانالی یافت نشد!"
+        
+        keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="settings")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(settings_text, reply_markup=reply_markup)
+    
+    elif data == "report_settings":
+        await query.edit_message_text(
+            "📊 تنظیمات گزارش:\n\n"
+            "• گزارش‌گیری خودکار: فعال\n"
+            "• بازه زمانی: روزانه\n"
+            "• ذخیره‌سازی: SQLite\n\n"
+            "تنظیمات پیشرفته در نسخه بعدی اضافه خواهد شد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="settings")]])
+        )
+    
+    elif data == "backup_db":
+        try:
+            # ایجاد بک‌آپ ساده
+            import shutil
+            from datetime import datetime
+            
+            backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            shutil.copy2(bot_instance.db_path, backup_name)
+            
+            await query.edit_message_text(
+                f"💾 بک‌آپ با موفقیت ایجاد شد!\n\n"
+                f"📁 نام فایل: {backup_name}\n"
+                f"📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"✅ فایل در سرور ذخیره شد.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="settings")]])
+            )
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ خطا در ایجاد بک‌آپ: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="settings")]])
+            )
     
     elif data.startswith("channel_"):
         channel_id = int(data.split("_")[1])
@@ -627,6 +870,93 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.edit_message_text(channel_text, reply_markup=reply_markup)
+    
+    elif data.startswith("send_post_"):
+        channel_id = data.split("_")[2]
+        await query.edit_message_text(
+            f"📝 برای ارسال پست به این کانال از دستور زیر استفاده کنید:\n\n"
+            f"/send {channel_id} [متن پیام]\n\n"
+            f"مثال:\n"
+            f"/send {channel_id} سلام دوستان!"
+        )
+    
+    elif data.startswith("full_stats_"):
+        channel_id = int(data.split("_")[2])
+        
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        # آمار کامل کانال
+        cursor.execute('''
+            SELECT channel_name, member_count, added_date, last_update
+            FROM channels WHERE channel_id = ?
+        ''', (channel_id,))
+        channel_info = cursor.fetchone()
+        
+        # آمار پست‌های اخیر
+        cursor.execute('''
+            SELECT COUNT(*), AVG(views), MAX(created_at)
+            FROM posts WHERE channel_id = ?
+        ''', (channel_id,))
+        post_stats = cursor.fetchone()
+        
+        conn.close()
+        
+        if channel_info:
+            name, member_count, added_date, last_update = channel_info
+            total_posts, avg_views, last_post = post_stats
+            
+            full_stats_text = f"""
+📊 آمار کامل کانال:
+
+📢 نام: {name}
+🆔 آیدی: {channel_id}
+👥 تعداد اعضا: {member_count:,}
+📅 تاریخ اضافه: {added_date[:10]}
+🔄 آخرین به‌روزرسانی: {last_update[:16]}
+
+📝 آمار پست‌ها:
+• کل پست‌ها: {total_posts or 0}
+• میانگین بازدید: {int(avg_views or 0)}
+• آخرین پست: {last_post[:16] if last_post else 'ندارد'}
+
+📈 عملکرد:
+• میانگین بازدید هر پست: {int(avg_views or 0)}
+• نرخ تعامل: {((avg_views or 0) / member_count * 100):.1f}%
+            """
+            
+            keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data=f"channel_{channel_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(full_stats_text, reply_markup=reply_markup)
+    
+    elif data == "back_channels":
+        # بازگشت به لیست کانال‌ها
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT channel_id, channel_name, channel_username FROM channels WHERE is_active = 1')
+        channels = cursor.fetchall()
+        conn.close()
+        
+        if channels:
+            keyboard = []
+            for channel_id, name, username in channels:
+                display_name = f"{name} (@{username})" if username else name
+                keyboard.append([InlineKeyboardButton(display_name, callback_data=f"channel_{channel_id}")])
+            
+            keyboard.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_main")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "📋 کانال‌های مدیریت شده:\n\nروی کانال مورد نظر کلیک کنید:",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.edit_message_text(
+                "هیچ کانالی یافت نشد!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 منوی اصلی", callback_data="back_main")]])
+            )
 
 async def scan_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """اسکن و شناسایی کانال‌های موجود"""
