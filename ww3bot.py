@@ -1,11 +1,12 @@
 import os
 import asyncio
-import random
 import sqlite3
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.constants import ParseMode
 import logging
+import json
 
 # تنظیم لاگ
 logging.basicConfig(
@@ -17,503 +18,550 @@ logger = logging.getLogger(__name__)
 # متغیرهای محیطی
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 OWNER_ID = int(os.getenv('OWNER_ID', '0'))
+CHANNEL_ID = os.getenv('CHANNEL_ID', '')
 
-class MathChallengeBot:
+class ChannelManagerBot:
     def __init__(self):
-        self.db_path = 'math_bot.db'
+        self.db_path = 'channel_manager.db'
         self.init_database()
-        self.current_challenges = {}
+        self.managed_channels = {}
         
     def init_database(self):
         """ایجاد جداول دیتابیس"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # جدول کاربران
+        # جدول کانال‌ها
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                score INTEGER DEFAULT 0,
-                correct_answers INTEGER DEFAULT 0,
-                total_answers INTEGER DEFAULT 0,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # جدول گروه‌ها
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS groups (
-                group_id INTEGER PRIMARY KEY,
-                group_name TEXT,
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id INTEGER PRIMARY KEY,
+                channel_name TEXT,
+                channel_username TEXT,
+                member_count INTEGER DEFAULT 0,
                 is_active INTEGER DEFAULT 1,
-                challenge_interval INTEGER DEFAULT 600,
-                difficulty_level INTEGER DEFAULT 1,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                added_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
-        # جدول چالش‌ها
+        # جدول پست‌ها
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS challenges (
+            CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id INTEGER,
-                question TEXT,
-                correct_answer INTEGER,
-                difficulty INTEGER,
+                channel_id INTEGER,
+                message_id INTEGER,
+                content TEXT,
+                post_type TEXT,
+                views INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                solved_by INTEGER DEFAULT NULL,
-                solved_at TIMESTAMP DEFAULT NULL
+                scheduled_time TIMESTAMP DEFAULT NULL
+            )
+        ''')
+        
+        # جدول آمار روزانه
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER,
+                date DATE,
+                member_count INTEGER,
+                new_members INTEGER DEFAULT 0,
+                left_members INTEGER DEFAULT 0,
+                posts_count INTEGER DEFAULT 0,
+                total_views INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # جدول تنظیمات
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                channel_id INTEGER,
+                setting_key TEXT,
+                setting_value TEXT,
+                PRIMARY KEY (channel_id, setting_key)
             )
         ''')
         
         conn.commit()
         conn.close()
     
-    def register_user(self, user_id, username, first_name):
-        """ثبت کاربر جدید"""
+    def add_channel(self, channel_id, channel_name, channel_username=None):
+        """اضافه کردن کانال جدید"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT OR REPLACE INTO users 
-            (user_id, username, first_name, last_activity)
+            INSERT OR REPLACE INTO channels 
+            (channel_id, channel_name, channel_username, last_update)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user_id, username, first_name))
+        ''', (channel_id, channel_name, channel_username))
         
         conn.commit()
         conn.close()
     
-    def register_group(self, group_id, group_name):
-        """ثبت گروه جدید"""
+    def get_channel_stats(self, channel_id):
+        """دریافت آمار کانال"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # آمار کلی کانال
+        cursor.execute('''
+            SELECT channel_name, member_count, added_date
+            FROM channels WHERE channel_id = ?
+        ''', (channel_id,))
+        channel_info = cursor.fetchone()
+        
+        # تعداد پست‌ها
+        cursor.execute('''
+            SELECT COUNT(*) FROM posts WHERE channel_id = ?
+        ''', (channel_id,))
+        posts_count = cursor.fetchone()[0]
+        
+        # مجموع بازدیدها
+        cursor.execute('''
+            SELECT SUM(views) FROM posts WHERE channel_id = ?
+        ''', (channel_id,))
+        total_views = cursor.fetchone()[0] or 0
+        
+        # آمار هفته گذشته
+        cursor.execute('''
+            SELECT SUM(new_members), SUM(left_members), SUM(posts_count)
+            FROM daily_stats 
+            WHERE channel_id = ? AND date >= date('now', '-7 days')
+        ''', (channel_id,))
+        weekly_stats = cursor.fetchone()
+        
+        conn.close()
+        
+        return {
+            'channel_info': channel_info,
+            'posts_count': posts_count,
+            'total_views': total_views,
+            'weekly_stats': weekly_stats
+        }
+    
+    def save_post(self, channel_id, message_id, content, post_type):
+        """ذخیره اطلاعات پست"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT OR REPLACE INTO groups 
-            (group_id, group_name)
-            VALUES (?, ?)
-        ''', (group_id, group_name))
+            INSERT INTO posts (channel_id, message_id, content, post_type)
+            VALUES (?, ?, ?, ?)
+        ''', (channel_id, message_id, content, post_type))
         
         conn.commit()
         conn.close()
-    
-    def generate_math_challenge(self, difficulty=1):
-        """تولید چالش ریاضی"""
-        if difficulty == 1:  # آسان
-            a = random.randint(1, 20)
-            b = random.randint(1, 20)
-            operation = random.choice(['+', '-'])
-            if operation == '+':
-                question = f"{a} + {b} = ?"
-                answer = a + b
-            else:
-                if a < b:
-                    a, b = b, a
-                question = f"{a} - {b} = ?"
-                answer = a - b
-                
-        elif difficulty == 2:  # متوسط
-            a = random.randint(10, 50)
-            b = random.randint(2, 12)
-            operation = random.choice(['+', '-', '*'])
-            if operation == '+':
-                question = f"{a} + {b} = ?"
-                answer = a + b
-            elif operation == '-':
-                question = f"{a} - {b} = ?"
-                answer = a - b
-            else:
-                question = f"{a} × {b} = ?"
-                answer = a * b
-                
-        else:  # سخت
-            a = random.randint(15, 99)
-            b = random.randint(15, 99)
-            c = random.randint(2, 9)
-            operation = random.choice(['mixed1', 'mixed2', 'division'])
-            if operation == 'mixed1':
-                question = f"{a} + {b} - {c} = ?"
-                answer = a + b - c
-            elif operation == 'mixed2':
-                question = f"{a} - {b} + {c} = ?"
-                answer = a - b + c
-            else:
-                a = random.randint(20, 100)
-                b = random.randint(2, 10)
-                a = a - (a % b)  # اطمینان از تقسیم بدون باقی‌مانده
-                question = f"{a} ÷ {b} = ?"
-                answer = a // b
-        
-        return question, answer
-    
-    def update_user_score(self, user_id, is_correct):
-        """به‌روزرسانی امتیاز کاربر"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if is_correct:
-            cursor.execute('''
-                UPDATE users 
-                SET score = score + 10, 
-                    correct_answers = correct_answers + 1,
-                    total_answers = total_answers + 1,
-                    last_activity = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            ''', (user_id,))
-        else:
-            cursor.execute('''
-                UPDATE users 
-                SET total_answers = total_answers + 1,
-                    last_activity = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            ''', (user_id,))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_leaderboard(self, limit=10):
-        """دریافت جدول رتبه‌بندی"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT first_name, username, score, correct_answers, total_answers
-            FROM users 
-            WHERE score > 0
-            ORDER BY score DESC, correct_answers DESC
-            LIMIT ?
-        ''', (limit,))
-        
-        results = cursor.fetchall()
-        conn.close()
-        return results
 
 # ایجاد نمونه از کلاس بات
-bot_instance = MathChallengeBot()
+bot_instance = ChannelManagerBot()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """دستور شروع"""
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    # ثبت کاربر
-    bot_instance.register_user(user.id, user.username, user.first_name)
-    
-    if chat.type == 'private':
-        welcome_text = f"""
-🤖 سلام {user.first_name}!
-
-به بات چالش ریاضی خوش آمدید!
-
-🎯 ویژگی‌های بات:
-• ارسال چالش ریاضی هر ۱۰ دقیقه
-• سیستم امتیازدهی
-• جدول رتبه‌بندی
-• سطوح مختلف سختی
-
-📋 دستورات:
-/leaderboard - نمایش رتبه‌بندی
-/stats - آمار شخصی
-/help - راهنما
-
-برای استفاده، بات را به گروه اضافه کنید!
-        """
-        await update.message.reply_text(welcome_text)
-    else:
-        # ثبت گروه
-        bot_instance.register_group(chat.id, chat.title)
-        await update.message.reply_text(
-            f"🎉 بات با موفقیت به گروه {chat.title} اضافه شد!\n"
-            "چالش‌های ریاضی هر ۱۰ دقیقه ارسال خواهند شد."
-        )
-        
-        # شروع ارسال چالش‌ها
-        context.job_queue.run_repeating(
-            send_challenge,
-            interval=600,  # ۱۰ دقیقه
-            first=10,
-            chat_id=chat.id,
-            name=f"challenge_{chat.id}"
-        )
-
-async def send_challenge(context: ContextTypes.DEFAULT_TYPE):
-    """ارسال چالش ریاضی"""
-    chat_id = context.job.chat_id
-    
-    # دریافت سطح سختی گروه
-    conn = sqlite3.connect(bot_instance.db_path)
-    cursor = conn.cursor()
-    cursor.execute('SELECT difficulty_level FROM groups WHERE group_id = ?', (chat_id,))
-    result = cursor.fetchone()
-    difficulty = result[0] if result else 1
-    conn.close()
-    
-    # تولید چالش
-    question, answer = bot_instance.generate_math_challenge(difficulty)
-    
-    # ذخیره چالش در دیتابیس
-    conn = sqlite3.connect(bot_instance.db_path)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO challenges (group_id, question, correct_answer, difficulty)
-        VALUES (?, ?, ?, ?)
-    ''', (chat_id, question, answer, difficulty))
-    challenge_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    
-    # ذخیره چالش فعلی
-    bot_instance.current_challenges[chat_id] = {
-        'id': challenge_id,
-        'answer': answer,
-        'question': question
-    }
-    
-    # ارسال چالش
-    challenge_text = f"""
-🧮 چالش ریاضی جدید!
-
-❓ {question}
-
-⏰ زمان: ۱۰ دقیقه
-🏆 امتیاز: ۱۰ امتیاز
-📊 سطح: {'آسان' if difficulty == 1 else 'متوسط' if difficulty == 2 else 'سخت'}
-
-اولین نفری که جواب درست بدهد برنده است! 🎉
-    """
-    
-    await context.bot.send_message(chat_id=chat_id, text=challenge_text)
-    
-    # تایمر برای نمایش جواب
-    context.job_queue.run_once(
-        show_answer,
-        when=600,  # ۱۰ دقیقه
-        chat_id=chat_id,
-        data={'challenge_id': challenge_id, 'answer': answer, 'question': question}
-    )
-
-async def show_answer(context: ContextTypes.DEFAULT_TYPE):
-    """نمایش جواب چالش"""
-    chat_id = context.job.chat_id
-    data = context.job.data
-    
-    # بررسی اینکه آیا چالش حل شده یا نه
-    conn = sqlite3.connect(bot_instance.db_path)
-    cursor = conn.cursor()
-    cursor.execute('SELECT solved_by FROM challenges WHERE id = ?', (data['challenge_id'],))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result and result[0]:
-        return  # چالش قبلاً حل شده
-    
-    answer_text = f"""
-⏰ زمان تمام شد!
-
-❓ سوال: {data['question']}
-✅ جواب صحیح: {data['answer']}
-
-متأسفانه هیچ کس نتوانست جواب درست بدهد.
-چالش بعدی به زودی ارسال می‌شود! 🔄
-    """
-    
-    await context.bot.send_message(chat_id=chat_id, text=answer_text)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش پیام‌ها برای بررسی جواب"""
-    if update.effective_chat.type == 'private':
-        return
-    
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    message_text = update.message.text
-    
-    # ثبت کاربر
-    bot_instance.register_user(user.id, user.username, user.first_name)
-    
-    # بررسی وجود چالش فعال
-    if chat_id not in bot_instance.current_challenges:
-        return
-    
-    try:
-        user_answer = int(message_text.strip())
-        correct_answer = bot_instance.current_challenges[chat_id]['answer']
-        challenge_id = bot_instance.current_challenges[chat_id]['id']
-        
-        if user_answer == correct_answer:
-            # جواب درست
-            bot_instance.update_user_score(user.id, True)
-            
-            # به‌روزرسانی چالش در دیتابیس
-            conn = sqlite3.connect(bot_instance.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE challenges 
-                SET solved_by = ?, solved_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (user.id, challenge_id))
-            conn.commit()
-            conn.close()
-            
-            # حذف چالش از حافظه
-            del bot_instance.current_challenges[chat_id]
-            
-            # ارسال پیام تبریک
-            congratulations = f"""
-🎉 تبریک {user.first_name}!
-
-✅ جواب شما درست بود: {correct_answer}
-🏆 ۱۰ امتیاز دریافت کردید!
-
-چالش بعدی به زودی ارسال می‌شود! 🔄
-            """
-            
-            await update.message.reply_text(congratulations)
-            
-    except ValueError:
-        # پیام عدد نیست
-        pass
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش جدول رتبه‌بندی"""
-    results = bot_instance.get_leaderboard()
-    
-    if not results:
-        await update.message.reply_text("هنوز هیچ کس امتیازی کسب نکرده است! 🤔")
-        return
-    
-    leaderboard_text = "🏆 جدول رتبه‌بندی:\n\n"
-    
-    for i, (first_name, username, score, correct, total) in enumerate(results, 1):
-        accuracy = (correct / total * 100) if total > 0 else 0
-        username_display = f"@{username}" if username else "بدون نام کاربری"
-        
-        leaderboard_text += f"{i}. {first_name} ({username_display})\n"
-        leaderboard_text += f"   💯 امتیاز: {score}\n"
-        leaderboard_text += f"   ✅ درست: {correct}/{total} ({accuracy:.1f}%)\n\n"
-    
-    await update.message.reply_text(leaderboard_text)
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش آمار شخصی"""
     user_id = update.effective_user.id
     
-    conn = sqlite3.connect(bot_instance.db_path)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT score, correct_answers, total_answers, join_date
-        FROM users WHERE user_id = ?
-    ''', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if not result:
-        await update.message.reply_text("شما هنوز ثبت نشده‌اید! از دستور /start استفاده کنید.")
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ شما دسترسی به این بات ندارید!")
         return
     
-    score, correct, total, join_date = result
-    accuracy = (correct / total * 100) if total > 0 else 0
-    
-    stats_text = f"""
-📊 آمار شخصی شما:
+    welcome_text = f"""
+🤖 سلام مالک عزیز!
 
-🏆 امتیاز کل: {score}
-✅ پاسخ‌های درست: {correct}
-📝 کل پاسخ‌ها: {total}
-🎯 درصد صحت: {accuracy:.1f}%
-📅 تاریخ عضویت: {join_date[:10]}
+به بات مدیریت کانال خوش آمدید!
 
-برای مشاهده رتبه‌بندی از /leaderboard استفاده کنید!
+🎯 قابلیت‌های بات:
+• مدیریت کامل کانال‌ها
+• آمار و گزارش‌گیری
+• ارسال و مدیریت پست‌ها
+• نظارت بر اعضا
+
+📋 دستورات اصلی:
+/panel - پنل مدیریت
+/stats - آمار کانال‌ها
+/channels - لیست کانال‌ها
+/help - راهنما
+
+برای شروع از دستور /panel استفاده کنید.
     """
     
-    await update.message.reply_text(stats_text)
+    await update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راهنمای استفاده"""
-    help_text = """
-🤖 راهنمای بات چالش ریاضی
-
-📋 دستورات:
-/start - شروع و ثبت نام
-/leaderboard - جدول رتبه‌بندی
-/stats - آمار شخصی
-/help - این راهنما
-
-🎮 نحوه بازی:
-• بات هر ۱۰ دقیقه یک چالش ریاضی ارسال می‌کند
-• اولین نفری که جواب درست بدهد ۱۰ امتیاز می‌گیرد
-• امتیازات در جدول رتبه‌بندی ثبت می‌شود
-
-🏆 سطوح سختی:
-• آسان: جمع و تفریق اعداد کوچک
-• متوسط: عملیات ترکیبی
-• سخت: محاسبات پیچیده‌تر
-
-برای مدیریت بات با سازنده تماس بگیرید.
-    """
+async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پنل مدیریت اصلی"""
+    user_id = update.effective_user.id
     
-    await update.message.reply_text(help_text)
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پنل مدیریت (فقط برای مالک)"""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("شما دسترسی به این بخش ندارید! ❌")
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
         return
     
     keyboard = [
-        [InlineKeyboardButton("📊 آمار کلی", callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 لیست گروه‌ها", callback_data="admin_groups")],
-        [InlineKeyboardButton("🏆 برترین کاربران", callback_data="admin_top_users")],
-        [InlineKeyboardButton("⚙️ تنظیمات", callback_data="admin_settings")]
+        [
+            InlineKeyboardButton("📊 آمار کانال‌ها", callback_data="stats_channels"),
+            InlineKeyboardButton("📝 مدیریت پست‌ها", callback_data="manage_posts")
+        ],
+        [
+            InlineKeyboardButton("👥 مدیریت اعضا", callback_data="manage_members"),
+            InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")
+        ],
+        [
+            InlineKeyboardButton("📈 گزارش‌ها", callback_data="reports"),
+            InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="refresh_data")
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🔧 پنل مدیریت بات\n\nگزینه مورد نظر را انتخاب کنید:",
+        "🎛️ پنل مدیریت کانال\n\nگزینه مورد نظر را انتخاب کنید:",
         reply_markup=reply_markup
     )
 
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش کال‌بک‌های پنل مدیریت"""
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش آمار کانال‌ها"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    conn = sqlite3.connect(bot_instance.db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM channels WHERE is_active = 1')
+    channels = cursor.fetchall()
+    
+    if not channels:
+        await update.message.reply_text("هیچ کانالی ثبت نشده است!")
+        conn.close()
+        return
+    
+    stats_text = "📊 آمار کانال‌های مدیریت شده:\n\n"
+    
+    for channel in channels:
+        channel_id, name, username, member_count, _, added_date, _ = channel
+        
+        # آمار پست‌ها
+        cursor.execute('SELECT COUNT(*) FROM posts WHERE channel_id = ?', (channel_id,))
+        posts_count = cursor.fetchone()[0]
+        
+        # مجموع بازدیدها
+        cursor.execute('SELECT SUM(views) FROM posts WHERE channel_id = ?', (channel_id,))
+        total_views = cursor.fetchone()[0] or 0
+        
+        stats_text += f"📢 {name}\n"
+        if username:
+            stats_text += f"   🔗 @{username}\n"
+        stats_text += f"   👥 اعضا: {member_count:,}\n"
+        stats_text += f"   📝 پست‌ها: {posts_count}\n"
+        stats_text += f"   👁️ بازدیدها: {total_views:,}\n"
+        stats_text += f"   📅 تاریخ اضافه: {added_date[:10]}\n\n"
+    
+    conn.close()
+    await update.message.reply_text(stats_text)
+
+async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """لیست کانال‌ها"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    conn = sqlite3.connect(bot_instance.db_path)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT channel_id, channel_name, channel_username FROM channels WHERE is_active = 1')
+    channels = cursor.fetchall()
+    conn.close()
+    
+    if not channels:
+        await update.message.reply_text("هیچ کانالی ثبت نشده است!")
+        return
+    
+    keyboard = []
+    for channel_id, name, username in channels:
+        display_name = f"{name} (@{username})" if username else name
+        keyboard.append([InlineKeyboardButton(display_name, callback_data=f"channel_{channel_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📋 کانال‌های مدیریت شده:\n\nروی کانال مورد نظر کلیک کنید:",
+        reply_markup=reply_markup
+    )
+
+async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ارسال پیام به کانال"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ لطفاً آیدی کانال و متن پیام را وارد کنید:\n"
+            "/send -1001234567890 متن پیام شما"
+        )
+        return
+    
+    try:
+        channel_id = int(context.args[0])
+        message_text = ' '.join(context.args[1:])
+        
+        if not message_text:
+            await update.message.reply_text("❌ متن پیام نمی‌تواند خالی باشد!")
+            return
+        
+        # ارسال پیام به کانال
+        sent_message = await context.bot.send_message(
+            chat_id=channel_id,
+            text=message_text,
+            parse_mode=ParseMode.HTML
+        )
+        
+        # ذخیره در دیتابیس
+        bot_instance.save_post(channel_id, sent_message.message_id, message_text, 'text')
+        
+        await update.message.reply_text(
+            f"✅ پیام با موفقیت به کانال ارسال شد!\n"
+            f"🆔 شناسه پیام: {sent_message.message_id}"
+        )
+        
+    except ValueError:
+        await update.message.reply_text("❌ آیدی کانال باید عدد باشد!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در ارسال پیام: {str(e)}")
+
+async def get_channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت اطلاعات کانال"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ لطفاً آیدی کانال را وارد کنید:\n"
+            "/info -1001234567890"
+        )
+        return
+    
+    try:
+        channel_id = int(context.args[0])
+        
+        # دریافت اطلاعات کانال
+        chat = await context.bot.get_chat(channel_id)
+        member_count = await context.bot.get_chat_member_count(channel_id)
+        
+        # ذخیره/به‌روزرسانی در دیتابیس
+        bot_instance.add_channel(channel_id, chat.title, chat.username)
+        
+        # به‌روزرسانی تعداد اعضا
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE channels SET member_count = ?, last_update = CURRENT_TIMESTAMP
+            WHERE channel_id = ?
+        ''', (member_count, channel_id))
+        conn.commit()
+        conn.close()
+        
+        info_text = f"""
+📢 اطلاعات کانال:
+
+🏷️ نام: {chat.title}
+🔗 نام کاربری: @{chat.username if chat.username else 'ندارد'}
+🆔 آیدی: {channel_id}
+👥 تعداد اعضا: {member_count:,}
+📝 توضیحات: {chat.description if chat.description else 'ندارد'}
+
+✅ اطلاعات در دیتابیس به‌روزرسانی شد.
+        """
+        
+        await update.message.reply_text(info_text)
+        
+    except ValueError:
+        await update.message.reply_text("❌ آیدی کانال باید عدد باشد!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در دریافت اطلاعات: {str(e)}")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش کال‌بک‌ها"""
     query = update.callback_query
     await query.answer()
     
     if query.from_user.id != OWNER_ID:
-        await query.edit_message_text("دسترسی غیرمجاز! ❌")
+        await query.edit_message_text("❌ دسترسی غیرمجاز!")
         return
     
-    if query.data == "admin_stats":
+    data = query.data
+    
+    if data == "stats_channels":
         conn = sqlite3.connect(bot_instance.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT COUNT(*) FROM users')
-        total_users = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM channels WHERE is_active = 1')
+        total_channels = cursor.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM groups WHERE is_active = 1')
-        active_groups = cursor.fetchone()[0]
+        cursor.execute('SELECT SUM(member_count) FROM channels WHERE is_active = 1')
+        total_members = cursor.fetchone()[0] or 0
         
-        cursor.execute('SELECT COUNT(*) FROM challenges')
-        total_challenges = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM posts')
+        total_posts = cursor.fetchone()[0]
         
-        cursor.execute('SELECT COUNT(*) FROM challenges WHERE solved_by IS NOT NULL')
-        solved_challenges = cursor.fetchone()[0]
+        cursor.execute('SELECT SUM(views) FROM posts')
+        total_views = cursor.fetchone()[0] or 0
         
         conn.close()
         
         stats_text = f"""
-📊 آمار کلی بات:
+📊 آمار کلی:
 
-👥 کل کاربران: {total_users}
-🏘️ گروه‌های فعال: {active_groups}
-🧮 کل چالش‌ها: {total_challenges}
-✅ چالش‌های حل شده: {solved_challenges}
-📈 نرخ حل: {(solved_challenges/total_challenges*100):.1f}%
+📢 کانال‌های فعال: {total_channels}
+👥 مجموع اعضا: {total_members:,}
+📝 کل پست‌ها: {total_posts}
+👁️ مجموع بازدیدها: {total_views:,}
+
+📈 میانگین اعضا در هر کانال: {total_members//total_channels if total_channels > 0 else 0:,}
+📊 میانگین بازدید هر پست: {total_views//total_posts if total_posts > 0 else 0}
         """
         
         await query.edit_message_text(stats_text)
+    
+    elif data == "manage_posts":
+        keyboard = [
+            [InlineKeyboardButton("📝 ارسال پست جدید", callback_data="new_post")],
+            [InlineKeyboardButton("📋 لیست پست‌ها", callback_data="list_posts")],
+            [InlineKeyboardButton("⏰ پست‌های زمان‌بندی شده", callback_data="scheduled_posts")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📝 مدیریت پست‌ها\n\nگزینه مورد نظر را انتخاب کنید:",
+            reply_markup=reply_markup
+        )
+    
+    elif data == "manage_members":
+        keyboard = [
+            [InlineKeyboardButton("👥 آمار اعضا", callback_data="member_stats")],
+            [InlineKeyboardButton("📈 نمودار رشد", callback_data="growth_chart")],
+            [InlineKeyboardButton("🔍 جستجوی کاربر", callback_data="search_user")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "👥 مدیریت اعضا\n\nگزینه مورد نظر را انتخاب کنید:",
+            reply_markup=reply_markup
+        )
+    
+    elif data == "settings":
+        keyboard = [
+            [InlineKeyboardButton("🔧 تنظیمات کانال", callback_data="channel_settings")],
+            [InlineKeyboardButton("📊 تنظیمات گزارش", callback_data="report_settings")],
+            [InlineKeyboardButton("💾 بک‌آپ دیتابیس", callback_data="backup_db")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⚙️ تنظیمات\n\nگزینه مورد نظر را انتخاب کنید:",
+            reply_markup=reply_markup
+        )
+    
+    elif data == "refresh_data":
+        await query.edit_message_text("🔄 در حال به‌روزرسانی اطلاعات...")
+        
+        # به‌روزرسانی اطلاعات کانال‌ها
+        conn = sqlite3.connect(bot_instance.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT channel_id FROM channels WHERE is_active = 1')
+        channels = cursor.fetchall()
+        
+        updated_count = 0
+        for (channel_id,) in channels:
+            try:
+                member_count = await context.bot.get_chat_member_count(channel_id)
+                cursor.execute('''
+                    UPDATE channels SET member_count = ?, last_update = CURRENT_TIMESTAMP
+                    WHERE channel_id = ?
+                ''', (member_count, channel_id))
+                updated_count += 1
+            except:
+                continue
+        
+        conn.commit()
+        conn.close()
+        
+        await query.edit_message_text(
+            f"✅ اطلاعات به‌روزرسانی شد!\n"
+            f"📊 {updated_count} کانال به‌روزرسانی شد."
+        )
+    
+    elif data.startswith("channel_"):
+        channel_id = int(data.split("_")[1])
+        stats = bot_instance.get_channel_stats(channel_id)
+        
+        if stats['channel_info']:
+            name, member_count, added_date = stats['channel_info']
+            
+            channel_text = f"""
+📢 {name}
+
+👥 اعضا: {member_count:,}
+📝 پست‌ها: {stats['posts_count']}
+👁️ بازدیدها: {stats['total_views']:,}
+📅 تاریخ اضافه: {added_date[:10]}
+
+📊 آمار هفته گذشته:
+➕ عضو جدید: {stats['weekly_stats'][0] or 0}
+➖ خروج: {stats['weekly_stats'][1] or 0}
+📝 پست جدید: {stats['weekly_stats'][2] or 0}
+            """
+            
+            keyboard = [
+                [InlineKeyboardButton("📝 ارسال پست", callback_data=f"send_post_{channel_id}")],
+                [InlineKeyboardButton("📊 آمار کامل", callback_data=f"full_stats_{channel_id}")],
+                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_channels")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(channel_text, reply_markup=reply_markup)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """راهنمای استفاده"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ دسترسی غیرمجاز!")
+        return
+    
+    help_text = """
+🤖 راهنمای بات مدیریت کانال
+
+📋 دستورات اصلی:
+/start - شروع بات
+/panel - پنل مدیریت
+/stats - آمار کانال‌ها
+/channels - لیست کانال‌ها
+/help - این راهنما
+
+📝 دستورات پست:
+/send [channel_id] [text] - ارسال پست
+/info [channel_id] - اطلاعات کانال
+
+🎯 نکات مهم:
+• بات را به کانال اضافه کرده و ادمین کنید
+• برای دریافت آیدی کانال از @userinfobot استفاده کنید
+• آیدی کانال‌های عمومی با -100 شروع می‌شود
+
+📞 پشتیبانی:
+در صورت بروز مشکل با سازنده تماس بگیرید.
+    """
+    
+    await update.message.reply_text(help_text)
 
 def main():
     """تابع اصلی"""
@@ -521,20 +569,25 @@ def main():
         logger.error("BOT_TOKEN تنظیم نشده است!")
         return
     
+    if OWNER_ID == 0:
+        logger.error("OWNER_ID تنظیم نشده است!")
+        return
+    
     # ایجاد اپلیکیشن
     application = Application.builder().token(BOT_TOKEN).build()
     
     # اضافه کردن هندلرها
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("leaderboard", leaderboard))
-    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("panel", panel))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("channels", channels_command))
+    application.add_handler(CommandHandler("send", send_to_channel))
+    application.add_handler(CommandHandler("info", get_channel_info))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CallbackQueryHandler(admin_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(callback_handler))
     
     # اجرای بات
-    logger.info("بات شروع به کار کرد...")
+    logger.info("بات مدیریت کانال شروع به کار کرد...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
